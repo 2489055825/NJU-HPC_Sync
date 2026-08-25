@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /opt/nju-hpc-sync/nju-hpc-sync "$@"

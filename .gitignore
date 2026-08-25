@@ -1,0 +1,60 @@
+# Python bytecode and test/tool caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local Python/Conda environments
+.venv/
+venv/
+env/
+ENV/
+.conda/
+
+# Local credentials and runtime state
+credentials.json
+credentials*.json
+!credentials.example.json
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.log
+.env
+.env.*
+!.env.example
+
+# Private keys and certificate bundles
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+id_ecdsa
+id_ecdsa.*
+id_dsa
+id_dsa.*
+
+# Build and packaging outputs
+dist/
+build/
+*.egg-info/
+release/*.deb
+release/*.deb.sha256
+
+# IDE and operating-system files
+.idea/
+.vscode/
+AGENTS.md
+.DS_Store
+Thumbs.db
+*.swp
+*.swo

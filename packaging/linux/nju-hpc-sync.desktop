@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=NJU-HPC Sync
+Comment=Synchronize files with NJU-HPC using rsync and OpenSSH
+Exec=nju-hpc-sync
+TryExec=nju-hpc-sync
+Icon=nju-hpc-sync
+Terminal=false
+Categories=Network;FileTransfer;
+Keywords=NJU;HPC;rsync;SSH;sync;
+StartupNotify=true
+StartupWMClass=nju-hpc-sync

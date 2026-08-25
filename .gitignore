@@ -54,6 +54,7 @@ release/*.deb.sha256
 .idea/
 .vscode/
 AGENTS.md
+Linux HPC rsync 图形同步工具开发提示词.md
 .DS_Store
 Thumbs.db
 *.swp

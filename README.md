@@ -10,7 +10,7 @@ NJU-HPC Sync 是一款面向 Linux 的 HPC 文件同步桌面应用。它把研�
 
 它不试图替代 HPC，也不把文件交给第三方云服务。它做的事情很专注：让本地目录与远程集群目录之间的可靠同步，变得更容易开始、更不容易误操作，也更方便在下一次继续。
 
-当前版本：`1.0.0`
+当前版本：`1.0.1`
 
 ## 一句话看懂它
 
@@ -227,7 +227,7 @@ release/nju-hpc-sync_<version>_amd64.deb.sha256
 本地安装：
 
 ```bash
-sudo apt install ./release/nju-hpc-sync_1.0.0_amd64.deb
+sudo apt install ./release/nju-hpc-sync_1.0.1_amd64.deb
 ```
 
 安装后可以从应用菜单启动，也可以运行：

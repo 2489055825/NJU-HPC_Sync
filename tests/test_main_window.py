@@ -4,7 +4,7 @@ import time
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QGroupBox, QProgressBar
+from PySide6.QtWidgets import QApplication, QFormLayout, QGroupBox, QProgressBar
 from PySide6.QtWidgets import QSizePolicy
 
 from app.credential_store import CredentialStore
@@ -35,10 +35,10 @@ def test_transfer_progress_is_parsed_and_displayed(tmp_path):
     window = MainWindow(Database(tmp_path / "app.sqlite3"), CredentialStore(tmp_path / "credentials.json"))
     window._append_log("\r         10,240 100%    1.25MB/s    0:00:01 (xfr#2, to-chk=4/12)\n")
 
-    assert window.transfer_count.text() == "文件：2 / 12"
+    assert window.transfer_count.text() == "2 / 12"
     assert window.transfer_details.text() == "大小：10.0 KiB / 10.0 KiB | 进度：100% | 速度：1.25MB/s"
     window._reset_transfer_info()
-    assert window.transfer_count.text() == "文件：-"
+    assert window.transfer_count.text() == "-"
     assert window.transfer_details.text() == "大小：- | 进度：- | 速度：-"
     window.close()
     app.processEvents()
@@ -73,7 +73,10 @@ def test_transfer_information_is_visually_grouped(tmp_path):
     app = QApplication.instance() or QApplication([])
     window = MainWindow(Database(tmp_path / "app.sqlite3"), CredentialStore(tmp_path / "credentials.json"))
 
-    assert any(group.title() == "传输实时信息" for group in window.findChildren(QGroupBox))
+    assert window.transfer_group.title() == "传输实时信息"
+    assert isinstance(window.transfer_group.layout(), QFormLayout)
+    assert window.transfer_group.layout().horizontalSpacing() == 24
+    assert window.transfer_group.layout().verticalSpacing() == 10
 
     window.close()
     app.processEvents()

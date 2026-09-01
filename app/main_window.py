@@ -286,17 +286,18 @@ class MainWindow(QMainWindow):
         buttons.addStretch()
         self.status_label = QLabel("Waiting")
         self.current_file = CurrentFileLabel()
-        self.transfer_count = QLabel("文件：-")
+        self.transfer_count = QLabel("-")
         self.transfer_details = QLabel("大小：- | 进度：- | 速度：-")
-        transfer_layout = QVBoxLayout()
-        transfer_layout.setContentsMargins(10, 8, 10, 8)
-        transfer_layout.setSpacing(4)
-        transfer_layout.addWidget(self.status_label)
-        transfer_layout.addWidget(self.current_file)
-        transfer_layout.addWidget(self.transfer_count)
-        transfer_layout.addWidget(self.transfer_details)
-        transfer_group = QGroupBox("传输实时信息")
-        transfer_group.setLayout(transfer_layout)
+        transfer_form = QFormLayout()
+        transfer_form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        transfer_form.setHorizontalSpacing(24)
+        transfer_form.setVerticalSpacing(10)
+        transfer_form.addRow("状态", self.status_label)
+        transfer_form.addRow("当前文件", self.current_file)
+        transfer_form.addRow("文件进度", self.transfer_count)
+        transfer_form.addRow("传输详情", self.transfer_details)
+        self.transfer_group = QGroupBox("传输实时信息")
+        self.transfer_group.setLayout(transfer_form)
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setLineWrapMode(QPlainTextEdit.NoWrap)
@@ -316,7 +317,7 @@ class MainWindow(QMainWindow):
         right.addWidget(paths_group)
         right.addWidget(options_widget)
         right.addLayout(buttons)
-        right.addWidget(transfer_group)
+        right.addWidget(self.transfer_group)
         right.addLayout(log_actions)
         right.addWidget(self.log, 1)
         right_widget = QWidget()
@@ -580,13 +581,13 @@ class MainWindow(QMainWindow):
         self.current_file.setToolTip("")
 
     def _reset_transfer_info(self) -> None:
-        self.transfer_count.setText("文件：-")
+        self.transfer_count.setText("-")
         self.transfer_details.setText("大小：- | 进度：- | 速度：-")
 
     def _update_transfer_progress(self, progress: tuple[int, int, str, int | None, int | None]) -> None:
         transferred, percent, speed, file_number, total_entries = progress
         if file_number is not None and total_entries is not None:
-            self.transfer_count.setText(f"文件：{file_number} / {total_entries}")
+            self.transfer_count.setText(f"{file_number} / {total_entries}")
         total_size = int(transferred * 100 / percent) if percent else None
         self.transfer_details.setText(
             f"大小：{self._format_bytes(transferred)} / {self._format_bytes(total_size)} | "

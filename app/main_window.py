@@ -286,6 +286,17 @@ class MainWindow(QMainWindow):
         buttons.addStretch()
         self.status_label = QLabel("Waiting")
         self.current_file = CurrentFileLabel()
+        self.transfer_count = QLabel("文件：-")
+        self.transfer_details = QLabel("大小：- | 进度：- | 速度：-")
+        transfer_layout = QVBoxLayout()
+        transfer_layout.setContentsMargins(10, 8, 10, 8)
+        transfer_layout.setSpacing(4)
+        transfer_layout.addWidget(self.status_label)
+        transfer_layout.addWidget(self.current_file)
+        transfer_layout.addWidget(self.transfer_count)
+        transfer_layout.addWidget(self.transfer_details)
+        transfer_group = QGroupBox("传输实时信息")
+        transfer_group.setLayout(transfer_layout)
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setLineWrapMode(QPlainTextEdit.NoWrap)
@@ -305,8 +316,7 @@ class MainWindow(QMainWindow):
         right.addWidget(paths_group)
         right.addWidget(options_widget)
         right.addLayout(buttons)
-        right.addWidget(self.status_label)
-        right.addWidget(self.current_file)
+        right.addWidget(transfer_group)
         right.addLayout(log_actions)
         right.addWidget(self.log, 1)
         right_widget = QWidget()
@@ -338,7 +348,13 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         menu.addAction(tutorial_action)
 
-    def _load_profiles(self) -> None:
+    def _load_profiles(self, selected_profile_id: int | None = None) -> None:
+        requested_selection = selected_profile_id is not None
+        current_item = self.profile_list.currentItem()
+        if selected_profile_id is None and current_item is not None:
+            selected_profile_id = current_item.data(256)
+        current_row = self.profile_list.currentRow()
+        scroll_position = self.profile_list.verticalScrollBar().value()
         self._profiles = self.db.list_profiles()
         self.profile_list.clear()
         for profile in self._profiles:
@@ -347,7 +363,21 @@ class MainWindow(QMainWindow):
             item.setData(256, profile.id)
             self.profile_list.addItem(item)
         if self.profile_list.count():
-            self.profile_list.setCurrentRow(0)
+            selected_row = next(
+                (index for index, profile in enumerate(self._profiles) if profile.id == selected_profile_id),
+                min(max(current_row, 0), self.profile_list.count() - 1),
+            )
+            self.profile_list.setCurrentRow(selected_row)
+            if requested_selection:
+                selected_item = self.profile_list.item(selected_row)
+                QTimer.singleShot(0, lambda: self.profile_list.scrollToItem(selected_item))
+            else:
+                QTimer.singleShot(
+                    0,
+                    lambda: self.profile_list.verticalScrollBar().setValue(
+                        min(scroll_position, self.profile_list.verticalScrollBar().maximum())
+                    ),
+                )
 
     def _refresh_credentials(self) -> None:
         try:
@@ -387,8 +417,8 @@ class MainWindow(QMainWindow):
         dialog = ProfileDialog(self, credential_names=list(self.credentials))
         if dialog.exec() == ProfileDialog.Accepted:
             try:
-                self.db.save_profile(dialog.result_profile())
-                self._load_profiles()
+                profile = self.db.save_profile(dialog.result_profile())
+                self._load_profiles(profile.id)
             except Exception as exc:
                 QMessageBox.warning(self, "无法保存 Profile", str(exc))
 
@@ -402,8 +432,8 @@ class MainWindow(QMainWindow):
         dialog = ProfileDialog(self, profile, list(self.credentials))
         if dialog.exec() == ProfileDialog.Accepted:
             try:
-                self.db.save_profile(dialog.result_profile())
-                self._load_profiles()
+                saved_profile = self.db.save_profile(dialog.result_profile())
+                self._load_profiles(saved_profile.id)
             except Exception as exc:
                 QMessageBox.warning(self, "无法保存 Profile", str(exc))
 
@@ -484,6 +514,7 @@ class MainWindow(QMainWindow):
         self._run_number += 1
         self._log_pending = ""
         self._last_log_status = ""
+        self._reset_transfer_info()
         self._clear_current_file()
         kind = "预览" if request.dry_run else "同步"
         profile = self._current_profile_name or "临时任务"
@@ -529,11 +560,17 @@ class MainWindow(QMainWindow):
             complete = ""
         self._log_pending = pending
         for line in complete.split("\n") if complete else []:
-            self._append_log_line(line)
-        for line in safe_text.splitlines():
-            change = self._parse_itemized_change(line)
-            if change and change[1]:
-                self._set_current_file(change[1])
+            self._process_output_line(line)
+        self._scroll_log_to_bottom()
+
+    def _process_output_line(self, line: str) -> None:
+        change = self._parse_itemized_change(line)
+        if change and change[1]:
+            self._set_current_file(change[1])
+        progress = self._parse_progress_line(line)
+        if progress:
+            self._update_transfer_progress(progress)
+        self._append_log_line(line)
 
     def _set_current_file(self, path: str) -> None:
         self.current_file.set_full_text(path)
@@ -541,6 +578,41 @@ class MainWindow(QMainWindow):
     def _clear_current_file(self) -> None:
         self.current_file.clear()
         self.current_file.setToolTip("")
+
+    def _reset_transfer_info(self) -> None:
+        self.transfer_count.setText("文件：-")
+        self.transfer_details.setText("大小：- | 进度：- | 速度：-")
+
+    def _update_transfer_progress(self, progress: tuple[int, int, str, int | None, int | None]) -> None:
+        transferred, percent, speed, file_number, total_entries = progress
+        if file_number is not None and total_entries is not None:
+            self.transfer_count.setText(f"文件：{file_number} / {total_entries}")
+        total_size = int(transferred * 100 / percent) if percent else None
+        self.transfer_details.setText(
+            f"大小：{self._format_bytes(transferred)} / {self._format_bytes(total_size)} | "
+            f"进度：{percent}% | 速度：{speed}"
+        )
+        if self._current_request is not None and not self._current_request.dry_run:
+            self.status_label.setText(RunStatus.TRANSFERRING.value)
+
+    @staticmethod
+    def _parse_progress_line(line: str) -> tuple[int, int, str, int | None, int | None] | None:
+        match = re.match(
+            r"^\s*([\d,]+)\s+(\d{1,3})%\s+([\d.]+(?:[kMGT]?B)/s)\s+"
+            r"(?:\d+|--):(?:\d+|--):(?:\d+|--)(?:\s+\(xfr#(\d+),\s*to-chk=(\d+)/(\d+)\))?\s*$",
+            line,
+            re.IGNORECASE,
+        )
+        if not match:
+            return None
+        transferred, percent, speed, file_number, _remaining, total_entries = match.groups()
+        return (
+            int(transferred.replace(",", "")),
+            int(percent),
+            speed,
+            int(file_number) if file_number is not None else None,
+            int(total_entries) if total_entries is not None else None,
+        )
 
     @Slot(str)
     def _append_notice(self, text: str) -> None:
@@ -551,7 +623,12 @@ class MainWindow(QMainWindow):
         if not line or not self._is_key_log_line(line):
             return
         self.log.appendPlainText(line)
-        self.log.ensureCursorVisible()
+        self._scroll_log_to_bottom()
+
+    def _scroll_log_to_bottom(self) -> None:
+        scrollbar = self.log.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+        QTimer.singleShot(0, lambda: scrollbar.setValue(scrollbar.maximum()))
 
     @staticmethod
     def _is_key_log_line(line: str) -> bool:
@@ -640,7 +717,7 @@ class MainWindow(QMainWindow):
 
     def _flush_log_pending(self) -> None:
         if self._log_pending.strip():
-            self._append_log_line(self._log_pending)
+            self._process_output_line(self._log_pending)
         self._log_pending = ""
 
     @Slot(str)
@@ -648,6 +725,7 @@ class MainWindow(QMainWindow):
         self.status_label.setText(status)
         if status in {RunStatus.SUCCESS.value, RunStatus.FAILED.value, RunStatus.CANCELLED.value}:
             self._clear_current_file()
+            self._reset_transfer_info()
             self.statusBar().clearMessage()
         elif status == RunStatus.PREVIEWING.value:
             self.statusBar().showMessage("正在预览…")
@@ -672,6 +750,7 @@ class MainWindow(QMainWindow):
             self._worker.cancel()
             self.status_label.setText(RunStatus.CANCELLED.value)
             self._clear_current_file()
+            self._reset_transfer_info()
             self.statusBar().clearMessage()
 
     @Slot(object)
@@ -735,6 +814,7 @@ class MainWindow(QMainWindow):
                     self._preview_completed = True
                     self._start_after_cleanup = True
         self._clear_current_file()
+        self._reset_transfer_info()
         self.status_label.setText(result.status.value)
         self.statusBar().clearMessage()
 

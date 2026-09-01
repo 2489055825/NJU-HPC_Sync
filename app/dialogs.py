@@ -232,14 +232,29 @@ class CredentialsDialog(QDialog):
         field.setEchoMode(QLineEdit.Normal if visible else QLineEdit.Password)
         button.setText("隐藏" if visible else "显示")
 
-    def _refresh_list(self) -> None:
-        current = self.name.text()
+    def _refresh_list(self, selected_name: str | None = None) -> None:
+        requested_selection = selected_name is not None
+        current_item = self.list.currentItem()
+        if selected_name is None and current_item is not None:
+            selected_name = current_item.text()
+        current_row = self.list.currentRow()
+        scroll_position = self.list.verticalScrollBar().value()
         self.list.clear()
         for name in sorted(self.credentials, key=str.casefold):
             self.list.addItem(QListWidgetItem(name))
         if self.list.count():
-            items = self.list.findItems(current, Qt.MatchExactly) if current else []
-            self.list.setCurrentItem(items[0] if items else self.list.item(0))
+            items = self.list.findItems(selected_name, Qt.MatchExactly) if selected_name else []
+            selected_item = items[0] if items else self.list.item(min(max(current_row, 0), self.list.count() - 1))
+            self.list.setCurrentItem(selected_item)
+            if requested_selection:
+                QTimer.singleShot(0, lambda: self.list.scrollToItem(selected_item))
+            else:
+                QTimer.singleShot(
+                    0,
+                    lambda: self.list.verticalScrollBar().setValue(
+                        min(scroll_position, self.list.verticalScrollBar().maximum())
+                    ),
+                )
         else:
             self._new()
 
@@ -281,7 +296,7 @@ class CredentialsDialog(QDialog):
             self.credentials[credential.name] = credential
             self._editing_name = credential.name
             self.store.save(self.credentials)
-            self._refresh_list()
+            self._refresh_list(credential.name)
             self.credentials_changed.emit()
         except (ValueError, RuntimeError) as exc:
             QMessageBox.warning(self, "无法保存凭据", str(exc))

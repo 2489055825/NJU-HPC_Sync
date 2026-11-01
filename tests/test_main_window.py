@@ -4,12 +4,12 @@ import time
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QFormLayout, QGroupBox, QProgressBar
+from PySide6.QtWidgets import QApplication, QDialog, QFormLayout, QGroupBox, QProgressBar
 from PySide6.QtWidgets import QSizePolicy
 
 from app.credential_store import CredentialStore
 from app.database import Database
-from app.dialogs import CredentialsDialog, HistoryDialog, PasswordDialog
+from app.dialogs import CredentialsDialog, HistoryDialog, HostConfigDialog, PasswordDialog
 from app.main_window import MainWindow
 from app.models import Credential, HistoryRecord, Profile, RunStatus, format_local_time
 
@@ -73,6 +73,45 @@ def test_main_window_has_no_progress_bar(tmp_path):
 
     window.close()
     app.processEvents()
+
+
+def test_management_menu_exposes_host_manager(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(Database(tmp_path / "app.sqlite3"), CredentialStore(tmp_path / "credentials.json"))
+
+    management_menu = window.menuBar().actions()[0].menu()
+
+    assert "Host 管理" in [action.text() for action in management_menu.actions()]
+    window.close()
+    app.processEvents()
+
+
+def test_host_manager_save_refreshes_host_selector(tmp_path, monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setenv("HOME", str(tmp_path))
+    ssh_dir = tmp_path / ".ssh"
+    ssh_dir.mkdir()
+    config = ssh_dir / "config"
+    config.write_text("Host alpha\n", encoding="utf-8")
+    window = MainWindow(Database(tmp_path / "app.sqlite3"), CredentialStore(tmp_path / "credentials.json"))
+    window.host_selector.set_host("alpha")
+    config.write_text("Host beta\n", encoding="utf-8")
+
+    original_exec = HostConfigDialog.exec
+
+    def emit_saved(dialog):
+        dialog.config_saved.emit()
+        return QDialog.Rejected
+
+    monkeypatch.setattr(HostConfigDialog, "exec", emit_saved)
+    try:
+        window._open_host_manager()
+
+        assert window.host_selector.combo.findData("beta") >= 0
+    finally:
+        monkeypatch.setattr(HostConfigDialog, "exec", original_exec)
+        window.close()
+        app.processEvents()
 
 
 def test_transfer_information_is_visually_grouped(tmp_path):

@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
 from .auth import AutoAuthProvider
 from .credential_store import CredentialStore
 from .database import Database
-from .dialogs import CredentialsDialog, HistoryDialog, LogManagementDialog, PasswordDialog, ProfileDialog, UsageDialog
+from .dialogs import CredentialsDialog, HistoryDialog, HostConfigDialog, LogManagementDialog, PasswordDialog, ProfileDialog, UsageDialog
 from .host_selector import SshHostSelector
 from .models import Direction, HistoryRecord, Profile, RunResult, RunStatus, SyncMode, SyncRequest, format_local_time
 from .paths import normalize_directory_path, normalize_local_path, redact_text
@@ -341,6 +341,8 @@ class MainWindow(QMainWindow):
         menu = self.menuBar().addMenu("管理")
         credentials_action = QAction("凭据管理", self)
         credentials_action.triggered.connect(self._open_credentials)
+        host_manager_action = QAction("Host 管理", self)
+        host_manager_action.triggered.connect(self._open_host_manager)
         history_action = QAction("同步历史", self)
         history_action.triggered.connect(self._open_history)
         log_management_action = QAction("日志管理", self)
@@ -348,6 +350,7 @@ class MainWindow(QMainWindow):
         tutorial_action = QAction("使用教程", self)
         tutorial_action.triggered.connect(self._open_tutorial)
         menu.addAction(credentials_action)
+        menu.addAction(host_manager_action)
         menu.addAction(history_action)
         menu.addAction(log_management_action)
         menu.addSeparator()
@@ -869,6 +872,11 @@ class MainWindow(QMainWindow):
     def _open_credentials(self) -> None:
         dialog = CredentialsDialog(self.credential_store, self)
         dialog.credentials_changed.connect(self._refresh_credentials)
+        dialog.exec()
+
+    def _open_host_manager(self) -> None:
+        dialog = HostConfigDialog(self)
+        dialog.config_saved.connect(self.host_selector.refresh)
         dialog.exec()
 
     def _open_history(self) -> None:

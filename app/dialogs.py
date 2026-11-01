@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 from PySide6.QtCore import QTimer, Qt, Signal
@@ -27,6 +28,7 @@ from .credential_store import CredentialStore
 from .host_selector import SshHostSelector
 from .models import Credential, Direction, Profile, SyncMode, format_local_time
 from .paths import normalize_directory_path, normalize_local_path
+from .ssh_config_editor import config_snapshot, load_ssh_config_state, save_ssh_config, ssh_config_path, validate_ssh_config
 from .totp import TotpConfig, generate_code, remaining_seconds
 
 
@@ -115,6 +117,113 @@ class ProfileDialog(QDialog):
             default_direction=self.direction.currentData(),
             default_mode=self.mode.currentData(),
         )
+
+
+class HostConfigDialog(QDialog):
+    config_saved = Signal()
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("Host 管理[*]")
+        self.resize(780, 600)
+        self.config_path = ssh_config_path()
+        self._snapshot: str | None = None
+        self.path_label = QLabel(f"主配置文件：{self.config_path}")
+        self.path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.editor = QPlainTextEdit()
+        self.editor.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.editor.setPlaceholderText("例如：\nHost hpc-alias\n    HostName cluster.example.com\n    User researcher")
+        self.status_label = QLabel()
+        self.status_label.setWordWrap(True)
+        self.reload_button = QPushButton("重新加载")
+        self.save_button = QPushButton("保存")
+        self.close_button = QPushButton("关闭")
+        self.reload_button.clicked.connect(self._reload)
+        self.save_button.clicked.connect(self._save)
+        self.close_button.clicked.connect(self.reject)
+        self._load_from_disk()
+        self.editor.document().modificationChanged.connect(self._update_title)
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.reload_button)
+        buttons.addStretch()
+        buttons.addWidget(self.save_button)
+        buttons.addWidget(self.close_button)
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.path_label)
+        layout.addWidget(QLabel("只编辑主配置文件；Include 引用的子文件不会被修改。保存前会创建 config.bak。"))
+        layout.addWidget(self.editor, 1)
+        layout.addWidget(self.status_label)
+        layout.addLayout(buttons)
+
+    def _update_title(self, modified: bool) -> None:
+        self.setWindowModified(modified)
+
+    def _load_from_disk(self) -> None:
+        try:
+            content, snapshot = load_ssh_config_state(self.config_path)
+        except (OSError, UnicodeError) as exc:
+            QMessageBox.warning(self, "无法读取 SSH 配置", f"无法读取 {self.config_path}，请检查文件权限和 UTF-8 编码。")
+            self.status_label.setText("读取失败，编辑内容未改变；请修复文件后重新加载。")
+            self.editor.setReadOnly(True)
+            self.save_button.setEnabled(False)
+            return
+        self._snapshot = snapshot
+        self.editor.setReadOnly(False)
+        self.save_button.setEnabled(True)
+        self.editor.setPlainText(content)
+        self.editor.document().setModified(False)
+        if self.config_path.exists():
+            self.status_label.setText("已加载主配置文件。")
+        else:
+            self.status_label.setText("主配置文件不存在，保存时会创建该文件。")
+
+    def _reload(self) -> None:
+        if self.editor.document().isModified():
+            answer = QMessageBox.question(
+                self,
+                "放弃未保存修改？",
+                "编辑器中有未保存的修改，重新加载会丢弃这些修改。是否继续？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
+        self._load_from_disk()
+
+    def _save(self) -> None:
+        text = self.editor.toPlainText()
+        errors = validate_ssh_config(text)
+        if errors:
+            QMessageBox.warning(self, "无法保存 SSH 配置", "\n".join(errors))
+            return
+        try:
+            current_snapshot = config_snapshot(self.config_path)
+        except OSError as exc:
+            QMessageBox.warning(self, "无法检查 SSH 配置", f"无法检查 {self.config_path}：{exc}")
+            return
+        changed = "文件已被其他程序修改，继续保存会覆盖外部修改。\n" if current_snapshot != self._snapshot else ""
+        backup_path = self.config_path.with_name("config.bak")
+        answer = QMessageBox.question(
+            self,
+            "确认保存 SSH 配置",
+            f"{changed}保存文件：{self.config_path}\n备份文件：{backup_path}\n"
+            "首次创建时无旧文件可备份。是否继续？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            backup = save_ssh_config(text, self.config_path, expected_snapshot=current_snapshot)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "无法保存 SSH 配置", str(exc))
+            return
+        self._snapshot = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        self.editor.document().setModified(False)
+        backup_text = f"备份：{backup}" if backup is not None else "首次创建文件，暂无旧文件备份。"
+        self.status_label.setText(f"保存成功。{backup_text}")
+        self.config_saved.emit()
+        QMessageBox.information(self, "保存成功", f"SSH 主配置已保存。\n{backup_text}")
 
 
 class PasswordDialog(QDialog):
@@ -421,7 +530,7 @@ class UsageDialog(QDialog):
             "rsync -avzP --stats --itemize-changes --delete --dry-run -- /本地目录/ nju:/远程目录/\n\n"
             "使用方法\n"
             "1. 管理 -> 凭据管理：自动 TOTP 可保存凭据；也可以选择手工输入完整密码。\n"
-            "2. 填写本地目录和远程目录，从下拉列表选择远程 Host；列表读取 ~/.ssh/config 及 Include 文件。修改 SSH 配置后点击“刷新”。凭据只负责认证。\n"
+            "2. 填写本地目录和远程目录，从下拉列表选择远程 Host；列表读取 ~/.ssh/config 及 Include 文件。修改 SSH 配置后点击“刷新”，或通过“管理 -> Host 管理”编辑主配置文件。凭据只负责认证。\n"
             "3. 选择方向和模式，先点“预览”；镜像同步确认删除数量后再执行。\n"
             "4. 目录会自动补齐尾部 /，表示同步目录内容。"
         )

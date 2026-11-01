@@ -35,6 +35,7 @@ from .auth import AutoAuthProvider
 from .credential_store import CredentialStore
 from .database import Database
 from .dialogs import CredentialsDialog, HistoryDialog, LogManagementDialog, PasswordDialog, ProfileDialog, UsageDialog
+from .host_selector import SshHostSelector
 from .models import Direction, HistoryRecord, Profile, RunResult, RunStatus, SyncMode, SyncRequest, format_local_time
 from .paths import normalize_directory_path, normalize_local_path, redact_text
 from .rsync_command import build_command, preflight
@@ -172,6 +173,8 @@ class MainWindow(QMainWindow):
         self._run_number = 0
         self._log_pending = ""
         self._last_log_status = ""
+        self._transfer_index = 0
+        self._transfer_total: int | None = None
         self._totp_replay_guard = TotpReplayGuard()
         self._build_ui()
         self._load_profiles()
@@ -209,8 +212,9 @@ class MainWindow(QMainWindow):
         local_row.addWidget(local_browse)
         local_widget = QWidget()
         local_widget.setLayout(local_row)
-        self.host = QLineEdit()
-        self.host.textChanged.connect(self._inputs_changed)
+        self.host_selector = SshHostSelector()
+        self.host = self.host_selector.combo
+        self.host.currentTextChanged.connect(self._inputs_changed)
         self.remote = QLineEdit()
         self.remote.textChanged.connect(self._inputs_changed)
         self.credential = QComboBox()
@@ -223,7 +227,7 @@ class MainWindow(QMainWindow):
         form.setHorizontalSpacing(14)
         form.setVerticalSpacing(10)
         form.addRow("本地目录", local_widget)
-        form.addRow("远程 Host", self.host)
+        form.addRow("远程 Host", self.host_selector)
         form.addRow("远程目录", self.remote)
         form.addRow("凭据", self.credential)
         form.addRow("认证方式", self.auth_mode)
@@ -404,7 +408,7 @@ class MainWindow(QMainWindow):
             return
         self._current_profile_name = profile.name
         self.local.setText(profile.local_path)
-        self.host.setText(profile.remote_host)
+        self.host_selector.set_host(profile.remote_host)
         self.remote.setText(profile.remote_path)
         self.upload.setChecked(profile.default_direction == Direction.UPLOAD.value)
         self.download.setChecked(profile.default_direction == Direction.DOWNLOAD.value)
@@ -476,7 +480,7 @@ class MainWindow(QMainWindow):
             remote_path = normalize_directory_path(self.remote.text())
             self.local.setText(local_path)
             self.remote.setText(remote_path)
-            request = SyncRequest(local_path, self.host.text(), remote_path, direction, mode, dry_run)
+            request = SyncRequest(local_path, self.host_selector.selected_host(), remote_path, direction, mode, dry_run)
             check = preflight(request)
             if not check.ok:
                 raise ValueError(check.message)
@@ -550,9 +554,9 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _append_log(self, text: str) -> None:
-        # Keep complete lines so PTY chunks split in the middle are filtered
-        # consistently. Ordinary file names and progress redraws are noise in
-        # the main view; history still stores the runner's complete output.
+        # Keep complete lines for the log so split PTY chunks are filtered
+        # consistently; progress fragments are parsed separately below so the
+        # status panel does not wait for the next carriage return or newline.
         safe_text = redact_text(text).replace("\r\n", "\n").replace("\r", "\n")
         self._log_pending += safe_text
         complete, separator, pending = self._log_pending.rpartition("\n")
@@ -562,16 +566,26 @@ class MainWindow(QMainWindow):
         self._log_pending = pending
         for line in complete.split("\n") if complete else []:
             self._process_output_line(line)
+        self._process_pending_progress()
         self._scroll_log_to_bottom()
 
     def _process_output_line(self, line: str) -> None:
         change = self._parse_itemized_change(line)
         if change and change[1]:
             self._set_current_file(change[1])
+            if change[0] in {"add", "update"}:
+                self._transfer_index += 1
+                self._render_transfer_count()
         progress = self._parse_progress_line(line)
         if progress:
             self._update_transfer_progress(progress)
         self._append_log_line(line)
+
+    def _process_pending_progress(self) -> None:
+        if self._log_pending.strip():
+            progress = self._parse_progress_line(self._log_pending)
+            if progress:
+                self._update_transfer_progress(progress)
 
     def _set_current_file(self, path: str) -> None:
         self.current_file.set_full_text(path)
@@ -581,13 +595,26 @@ class MainWindow(QMainWindow):
         self.current_file.setToolTip("")
 
     def _reset_transfer_info(self) -> None:
+        self._transfer_index = 0
+        self._transfer_total = None
         self.transfer_count.setText("-")
         self.transfer_details.setText("大小：- | 进度：- | 速度：-")
 
+    def _render_transfer_count(self) -> None:
+        if self._transfer_index <= 0:
+            self.transfer_count.setText("-")
+        elif self._transfer_total is None:
+            self.transfer_count.setText(f"{self._transfer_index} / 统计中")
+        else:
+            self.transfer_count.setText(f"{self._transfer_index} / {self._transfer_total}")
+
     def _update_transfer_progress(self, progress: tuple[int, int, str, int | None, int | None]) -> None:
         transferred, percent, speed, file_number, total_entries = progress
-        if file_number is not None and total_entries is not None:
-            self.transfer_count.setText(f"{file_number} / {total_entries}")
+        if file_number is not None:
+            self._transfer_index = max(self._transfer_index, file_number)
+        if total_entries is not None:
+            self._transfer_total = total_entries
+        self._render_transfer_count()
         total_size = int(transferred * 100 / percent) if percent else None
         self.transfer_details.setText(
             f"大小：{self._format_bytes(transferred)} / {self._format_bytes(total_size)} | "

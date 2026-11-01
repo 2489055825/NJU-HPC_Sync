@@ -33,9 +33,15 @@ def test_final_status_clears_current_file(tmp_path):
 def test_transfer_progress_is_parsed_and_displayed(tmp_path):
     app = QApplication.instance() or QApplication([])
     window = MainWindow(Database(tmp_path / "app.sqlite3"), CredentialStore(tmp_path / "credentials.json"))
-    window._append_log("\r         10,240 100%    1.25MB/s    0:00:01 (xfr#2, to-chk=4/12)\n")
+    window._append_log(">f+++++++++ result/file.pth\n")
+    assert window.transfer_count.text() == "1 / 统计中"
 
-    assert window.transfer_count.text() == "2 / 12"
+    window._append_log("\r              0   0%    0.00kB/s    0:00:00")
+    assert window.transfer_details.text() == "大小：0 B / 未知 | 进度：0% | 速度：0.00kB/s"
+
+    window._append_log("\r         10,240 100%    1.25MB/s    0:00:01 (xfr#1, to-chk=4/12)\n")
+
+    assert window.transfer_count.text() == "1 / 12"
     assert window.transfer_details.text() == "大小：10.0 KiB / 10.0 KiB | 进度：100% | 速度：1.25MB/s"
     window._reset_transfer_info()
     assert window.transfer_count.text() == "-"

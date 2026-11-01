@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from .credential_store import CredentialStore
+from .host_selector import SshHostSelector
 from .models import Credential, Direction, Profile, SyncMode, format_local_time
 from .paths import normalize_directory_path, normalize_local_path
 from .totp import TotpConfig, generate_code, remaining_seconds
@@ -50,7 +51,10 @@ class ProfileDialog(QDialog):
         local_row.addWidget(browse)
         local_widget = QWidget()
         local_widget.setLayout(local_row)
-        self.host = QLineEdit(profile.remote_host if profile else "")
+        self.host_selector = SshHostSelector()
+        self.host = self.host_selector.combo
+        if profile:
+            self.host_selector.set_host(profile.remote_host)
         self.remote = QLineEdit(profile.remote_path if profile else "")
         self.credential = QComboBox()
         self.credential.addItem("（手工输入）", "")
@@ -71,7 +75,7 @@ class ProfileDialog(QDialog):
             self.mode.setCurrentIndex(self.mode.findData(profile.default_mode))
         form.addRow("名称", self.name)
         form.addRow("本地目录", local_widget)
-        form.addRow("远程 Host", self.host)
+        form.addRow("远程 Host", self.host_selector)
         form.addRow("远程目录", self.remote)
         form.addRow("凭据", self.credential)
         form.addRow("默认方向", self.direction)
@@ -90,8 +94,13 @@ class ProfileDialog(QDialog):
             self.local.setText(path)
 
     def _validate_and_accept(self) -> None:
-        if not all([self.name.text().strip(), self.local.text().strip(), self.host.text().strip(), self.remote.text().strip()]):
-            QMessageBox.warning(self, "信息不完整", "请填写名称、本地目录、远程 Host 和远程目录。")
+        if not all([self.name.text().strip(), self.local.text().strip(), self.remote.text().strip()]):
+            QMessageBox.warning(self, "信息不完整", "请填写名称、本地目录和远程目录，并选择远程 Host。")
+            return
+        try:
+            self.host_selector.selected_host()
+        except ValueError as exc:
+            QMessageBox.warning(self, "请选择远程 Host", str(exc))
             return
         self.accept()
 
@@ -100,7 +109,7 @@ class ProfileDialog(QDialog):
             id=self.profile.id if self.profile else None,
             name=self.name.text().strip(),
             local_path=normalize_directory_path(normalize_local_path(self.local.text())),
-            remote_host=self.host.text().strip(),
+            remote_host=self.host_selector.selected_host(),
             remote_path=normalize_directory_path(self.remote.text()),
             credential_name=self.credential.currentData() or "",
             default_direction=self.direction.currentData(),
@@ -412,7 +421,7 @@ class UsageDialog(QDialog):
             "rsync -avzP --stats --itemize-changes --delete --dry-run -- /本地目录/ nju:/远程目录/\n\n"
             "使用方法\n"
             "1. 管理 -> 凭据管理：自动 TOTP 可保存凭据；也可以选择手工输入完整密码。\n"
-            "2. 填写本地目录、远程 Host、远程目录。远程 Host 始终必填，凭据只负责认证。\n"
+            "2. 填写本地目录和远程目录，从下拉列表选择远程 Host；列表读取 ~/.ssh/config 及 Include 文件。修改 SSH 配置后点击“刷新”。凭据只负责认证。\n"
             "3. 选择方向和模式，先点“预览”；镜像同步确认删除数量后再执行。\n"
             "4. 目录会自动补齐尾部 /，表示同步目录内容。"
         )

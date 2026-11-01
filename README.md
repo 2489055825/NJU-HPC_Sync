@@ -10,7 +10,7 @@ NJU-HPC Sync 是一款面向 Linux 的 HPC 文件同步桌面应用。它把研�
 
 它不试图替代 HPC，也不把文件交给第三方云服务。它做的事情很专注：让本地目录与远程集群目录之间的可靠同步，变得更容易开始、更不容易误操作，也更方便在下一次继续。
 
-当前版本：`1.0.2`
+当前版本：`1.0.3`
 
 ## 一句话看懂它
 
@@ -130,9 +130,19 @@ NJU-HPC Sync 将“连接能力”和“凭据数据”分开处理：
 
 先确保系统 OpenSSH 可以通过 Host 别名连接目标集群。应用只需要这个别名，不需要你在应用中重复填写 SSH 的底层连接参数。
 
+主界面和 Profile 的“远程 Host”会从 `~/.ssh/config` 及其 `Include` 文件读取具体别名，供下拉选择。例如：
+
+```sshconfig
+Host hpc-alias
+    HostName cluster.example.com
+    User researcher
+```
+
+修改 SSH 配置后，点击 Host 旁的“刷新”。列表按声明顺序去重，过滤 `Host *`、`*.example.com`、否定规则等不能直接选择的模式。Include 支持绝对路径、相对于 `~/.ssh` 的路径、`~` 和通配路径。列表只做静态枚举，不执行 `Match exec` 等配置指令；连接条件和参数仍交给 OpenSSH 处理。若原 Profile 使用的 Host 已被移除，界面会提示重新选择，并阻止使用失效的选择开始同步。
+
 ### 第二步：创建凭据与 Profile
 
-在“管理 → 凭据管理”中配置自动 TOTP 凭据，或选择手工认证。然后新建 Profile，填写：
+在“管理 → 凭据管理”中配置自动 TOTP 凭据，或选择手工认证。然后新建 Profile，填写名称及目录，并从下拉列表选择远程 Host：
 
 ```text
 Profile:      我的 HPC 项目
@@ -227,7 +237,7 @@ release/nju-hpc-sync_<version>_amd64.deb.sha256
 本地安装：
 
 ```bash
-sudo apt install ./release/nju-hpc-sync_1.0.2_amd64.deb
+sudo apt install ./release/nju-hpc-sync_1.0.3_amd64.deb
 ```
 
 安装后可以从应用菜单启动，也可以运行：

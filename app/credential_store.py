@@ -17,8 +17,8 @@ class CredentialStore:
             return {}
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise RuntimeError(f"无法读取凭据文件：{exc}") from exc
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("无法读取凭据文件，请检查文件权限、UTF-8 编码和 JSON 格式。") from exc
         if not isinstance(data, dict):
             raise RuntimeError("凭据文件格式必须是 JSON 对象")
         result: dict[str, Credential] = {}
@@ -34,7 +34,8 @@ class CredentialStore:
                     totp_period=int(value.get("totp_period", 30)),
                     totp_digits=int(value.get("totp_digits", 6)),
                 )
-            except (TypeError, ValueError) as exc:
+                result[name].validate()
+            except (TypeError, ValueError, OverflowError) as exc:
                 raise RuntimeError(f"凭据“{name}”的参数格式无效") from exc
         return result
 

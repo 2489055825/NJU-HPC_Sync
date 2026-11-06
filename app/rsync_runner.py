@@ -11,12 +11,13 @@ from typing import Callable, Iterable, Optional
 import pexpect
 
 from .models import RunResult, RunStatus
-from .paths import redact_text
+from .paths import StreamingRedactor, redact_text
 
 
 # OpenSSH commonly prints `user@host's password:` on one line, while
 # keyboard-interactive gateways may use `Verification code:` or `OTP:`.
 PROMPT_PATTERN = r"(?im)(?:^|[\r\n])[^\r\n]{0,160}?(?:password|passphrase|verification code|otp)\s*[:：]\s*"
+HOST_KEY_PATTERN = r"(?im)(?:^|[\r\n])Are you sure you want to continue connecting\s*\(yes/no(?:/\[fingerprint\])?\)\?\s*"
 
 
 class RunnerCancelled(Exception):
@@ -28,6 +29,7 @@ class RunnerCallbacks:
     on_output: Callable[[str], None] | None = None
     on_status: Callable[[RunStatus], None] | None = None
     on_prompt: Callable[[str], str | None] | None = None
+    on_host_key: Callable[[str], bool] | None = None
 
 
 class RsyncRunner:
@@ -64,13 +66,14 @@ class RsyncRunner:
         started = time.monotonic()
         start_time = datetime.now(timezone.utc).isoformat(timespec="seconds")
         output_parts: list[str] = []
+        redactor = StreamingRedactor(self._secrets)
 
         def emit_status(status: RunStatus) -> None:
             if callbacks.on_status:
                 callbacks.on_status(status)
 
-        def emit_output(value: str) -> None:
-            safe = redact_text(value, self._secrets)
+        def emit_output(value: str, *, final: bool = False) -> None:
+            safe = redactor.feed(value, final=final)
             if safe:
                 output_parts.append(safe)
                 if callbacks.on_output:
@@ -86,7 +89,7 @@ class RsyncRunner:
                     cancelled = self._cancel_requested
                 if cancelled:
                     raise RunnerCancelled()
-                index = child.expect([PROMPT_PATTERN, pexpect.EOF, pexpect.TIMEOUT])
+                index = child.expect([HOST_KEY_PATTERN, PROMPT_PATTERN, pexpect.EOF, pexpect.TIMEOUT])
                 before = child.before or ""
                 if before:
                     # pexpect keeps an unmatched PTY buffer across TIMEOUTs.
@@ -96,9 +99,16 @@ class RsyncRunner:
                     else:
                         emit_output(before)
                     emitted_buffer = before
-                if index == 0:
+                if index in {0, 1}:
                     # A successful match consumes `before` and the prompt.
                     emitted_buffer = ""
+                    if index == 0:
+                        prompt = redact_text(before[-4096:] + (child.after or ""), self._secrets)
+                        if callbacks.on_host_key is None or not callbacks.on_host_key(prompt):
+                            raise RunnerCancelled()
+                        child.sendline("yes")
+                        emit_status(RunStatus.CONNECTING)
+                        continue
                     prompt = child.after or "Password:"
                     emit_status(RunStatus.AUTHENTICATING)
                     if callbacks.on_prompt is None:
@@ -111,7 +121,7 @@ class RsyncRunner:
                     del password
                     emit_status(RunStatus.TRANSFERRING)
                     continue
-                if index == 1:
+                if index == 2:
                     break
                 if not child.isalive():
                     break
@@ -138,11 +148,15 @@ class RsyncRunner:
             emit_output(f"\n{type(exc).__name__}: {exc}\n")
             status, code = RunStatus.FAILED, None
         finally:
+            emit_output("", final=True)
+            safe_output = redact_text("".join(output_parts), self._secrets)
+            if self._child is not None and self._child.isalive():
+                self._child.close(force=True)
             emit_status(status)
             end_time = datetime.now(timezone.utc).isoformat(timespec="seconds")
             self._child = None
             self._secrets = []
-        return RunResult(status, code, "".join(output_parts), start_time, end_time, time.monotonic() - started, list(command))
+        return RunResult(status, code, safe_output, start_time, end_time, time.monotonic() - started, list(command))
 
 
 def friendly_exit_message(exit_code: int | None) -> str:

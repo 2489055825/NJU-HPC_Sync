@@ -128,6 +128,7 @@ class HostConfigDialog(QDialog):
         self.resize(780, 600)
         self.config_path = ssh_config_path()
         self._snapshot: str | None = None
+        self._saved_text = ""
         self.path_label = QLabel(f"主配置文件：{self.config_path}")
         self.path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.editor = QPlainTextEdit()
@@ -171,6 +172,7 @@ class HostConfigDialog(QDialog):
         self.editor.setReadOnly(False)
         self.save_button.setEnabled(True)
         self.editor.setPlainText(content)
+        self._saved_text = self.editor.toPlainText()
         self.editor.document().setModified(False)
         if self.config_path.exists():
             self.status_label.setText("已加载主配置文件。")
@@ -178,7 +180,7 @@ class HostConfigDialog(QDialog):
             self.status_label.setText("主配置文件不存在，保存时会创建该文件。")
 
     def _reload(self) -> None:
-        if self.editor.document().isModified():
+        if self.editor.toPlainText() != self._saved_text:
             answer = QMessageBox.question(
                 self,
                 "放弃未保存修改？",
@@ -190,17 +192,17 @@ class HostConfigDialog(QDialog):
                 return
         self._load_from_disk()
 
-    def _save(self) -> None:
+    def _save(self) -> bool:
         text = self.editor.toPlainText()
         errors = validate_ssh_config(text)
         if errors:
             QMessageBox.warning(self, "无法保存 SSH 配置", "\n".join(errors))
-            return
+            return False
         try:
             current_snapshot = config_snapshot(self.config_path)
         except OSError as exc:
             QMessageBox.warning(self, "无法检查 SSH 配置", f"无法检查 {self.config_path}：{exc}")
-            return
+            return False
         changed = "文件已被其他程序修改，继续保存会覆盖外部修改。\n" if current_snapshot != self._snapshot else ""
         backup_path = self.config_path.with_name("config.bak")
         answer = QMessageBox.question(
@@ -212,18 +214,41 @@ class HostConfigDialog(QDialog):
             QMessageBox.No,
         )
         if answer != QMessageBox.Yes:
-            return
+            return False
         try:
             backup = save_ssh_config(text, self.config_path, expected_snapshot=current_snapshot)
         except (OSError, ValueError) as exc:
             QMessageBox.warning(self, "无法保存 SSH 配置", str(exc))
-            return
+            return False
         self._snapshot = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        self._saved_text = text
         self.editor.document().setModified(False)
         backup_text = f"备份：{backup}" if backup is not None else "首次创建文件，暂无旧文件备份。"
         self.status_label.setText(f"保存成功。{backup_text}")
         self.config_saved.emit()
         QMessageBox.information(self, "保存成功", f"SSH 主配置已保存。\n{backup_text}")
+        return True
+
+    def _can_close(self) -> bool:
+        if self.editor.toPlainText() == self._saved_text:
+            return True
+        answer = QMessageBox.question(
+            self, "SSH 配置尚未保存", "有未保存的修改，是否保存后关闭？",
+            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel, QMessageBox.Cancel,
+        )
+        if answer == QMessageBox.Save:
+            return self._save()
+        return answer == QMessageBox.Discard
+
+    def reject(self) -> None:
+        if self._can_close():
+            super().reject()
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        if self._can_close():
+            event.accept()
+        else:
+            event.ignore()
 
 
 class PasswordDialog(QDialog):

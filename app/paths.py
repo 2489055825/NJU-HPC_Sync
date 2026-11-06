@@ -60,3 +60,41 @@ def redact_text(text: str, secrets: list[str] | tuple[str, ...] = ()) -> str:
     # A prompt or command line should never reveal a complete dynamic password.
     result = re.sub(r"(?i)(password\s*[:=]\s*)([^\r\n]+)", r"\1[REDACTED]", result)
     return result
+
+
+class StreamingRedactor:
+    """Retain incomplete secret prefixes and lines before exposing PTY output."""
+
+    def __init__(self, secrets: list[str]):
+        self._secrets = secrets
+        self._pending = ""
+        self._line = ""
+
+    def feed(self, value: str, *, final: bool = False) -> str:
+        text = self._pending + value
+        self._pending = ""
+        known = sorted({secret for secret in self._secrets if secret}, key=len, reverse=True)
+        parts: list[str] = []
+        index = 0
+        while index < len(text):
+            remaining = len(text) - index
+            if any(len(secret) > remaining and secret.startswith(text[index:]) for secret in known):
+                if final:
+                    parts.append("[REDACTED]")
+                else:
+                    self._pending = text[index:]
+                break
+            matched = next((secret for secret in known if text.startswith(secret, index)), None)
+            if matched is not None:
+                parts.append("[REDACTED]")
+                index += len(matched)
+                continue
+            parts.append(text[index])
+            index += 1
+        self._line += "".join(parts)
+        end = len(self._line) if final else max(self._line.rfind("\r"), self._line.rfind("\n")) + 1
+        complete, self._line = self._line[:end], self._line[end:]
+        return redact_text(complete)
+
+    def flush(self) -> str:
+        return self.feed("", final=True)

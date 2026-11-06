@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import re
 import shlex
+from dataclasses import replace
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, QTimer, QSize, Qt, Signal, Slot
@@ -109,6 +110,7 @@ class SyncWorker(QObject):
     output = Signal(str)
     status = Signal(str)
     prompt = Signal(str)
+    host_key_prompt = Signal(str)
     notice = Signal(str)
     finished = Signal(object)
 
@@ -121,6 +123,7 @@ class SyncWorker(QObject):
         self.replay_guard = replay_guard
         self.runner = RsyncRunner()
         self.broker = PromptBroker(self.prompt)
+        self.host_key_broker = PromptBroker(self.host_key_prompt)
 
     @Slot()
     def run(self) -> None:
@@ -137,7 +140,10 @@ class SyncWorker(QObject):
             def report_status(value: RunStatus) -> None:
                 self.status.emit(RunStatus.PREVIEWING.value if self.dry_run and value in {RunStatus.CONNECTING, RunStatus.TRANSFERRING} else value.value)
 
-            callbacks = RunnerCallbacks(on_output=self.output.emit, on_status=report_status, on_prompt=provider)
+            callbacks = RunnerCallbacks(
+                on_output=self.output.emit, on_status=report_status, on_prompt=provider,
+                on_host_key=lambda prompt: self.host_key_broker.request(prompt) == "yes",
+            )
             result = self.runner.run(self.command, callbacks, secrets=secrets, preflight=False)
         except Exception as exc:
             self.output.emit(f"{type(exc).__name__}: {exc}\n")
@@ -149,7 +155,11 @@ class SyncWorker(QObject):
 
     def cancel(self) -> None:
         self.broker.answer(None)
+        self.host_key_broker.answer(None)
         self.runner.cancel()
+
+    def answer_host_key(self, accepted: bool) -> None:
+        self.host_key_broker.answer("yes" if accepted else "no")
 
 
 class MainWindow(QMainWindow):
@@ -160,7 +170,7 @@ class MainWindow(QMainWindow):
         self.db = database or Database()
         self.db.cleanup_history()
         self.credential_store = credentials or CredentialStore()
-        self.credentials = self.credential_store.load()
+        self.credentials = {}
         self._profiles: list[Profile] = []
         self._thread: QThread | None = None
         self._worker: SyncWorker | None = None
@@ -169,6 +179,7 @@ class MainWindow(QMainWindow):
         self._pending_mirror = False
         self._start_after_cleanup = False
         self._preview_completed = False
+        self._preview_request: SyncRequest | None = None
         self._preview_output = ""
         self._run_number = 0
         self._log_pending = ""
@@ -275,6 +286,7 @@ class MainWindow(QMainWindow):
         options.addWidget(self.mode_warning)
         options_widget = QWidget()
         options_widget.setLayout(options)
+        self._task_panels = [left_widget, paths_group, options_widget]
 
         self.preview_button = QPushButton("预览")
         self.sync_button = QPushButton("开始同步")
@@ -343,6 +355,7 @@ class MainWindow(QMainWindow):
         credentials_action.triggered.connect(self._open_credentials)
         host_manager_action = QAction("Host 管理", self)
         host_manager_action.triggered.connect(self._open_host_manager)
+        self._task_actions = [credentials_action, host_manager_action]
         history_action = QAction("同步历史", self)
         history_action.triggered.connect(self._open_history)
         log_management_action = QAction("日志管理", self)
@@ -393,6 +406,7 @@ class MainWindow(QMainWindow):
         except RuntimeError as exc:
             self.credentials = {}
             self.statusBar().showMessage(str(exc), 8000)
+            self.auth_mode.setCurrentIndex(self.auth_mode.findData("manual"))
         selected = self.credential.currentData() if hasattr(self, "credential") else ""
         self.credential.clear()
         self.credential.addItem("（手工输入）", "")
@@ -419,7 +433,7 @@ class MainWindow(QMainWindow):
         self.mirror.setChecked(profile.default_mode == SyncMode.MIRROR.value)
         index = self.credential.findData(profile.credential_name)
         self.credential.setCurrentIndex(index if index >= 0 else 0)
-        self._preview_completed = False
+        self._invalidate_preview()
 
     def _new_profile(self) -> None:
         dialog = ProfileDialog(self, credential_names=list(self.credentials))
@@ -460,17 +474,41 @@ class MainWindow(QMainWindow):
 
     def _direction_changed(self, checked: bool, _direction: Direction) -> None:
         if checked:
-            self._preview_completed = False
+            self._invalidate_preview()
 
     def _inputs_changed(self, _value: str) -> None:
+        self._invalidate_preview()
+
+    def _invalidate_preview(self) -> None:
         self._preview_completed = False
+        self._preview_request = None
+
+    def _form_matches_request(self, request: SyncRequest) -> bool:
+        try:
+            current = SyncRequest(
+                normalize_directory_path(normalize_local_path(self.local.text())),
+                self.host_selector.selected_host(),
+                normalize_directory_path(self.remote.text()),
+                Direction.UPLOAD if self.upload.isChecked() else Direction.DOWNLOAD,
+                SyncMode.MIRROR if self.mirror.isChecked() else SyncMode.NORMAL,
+            )
+        except ValueError:
+            return False
+        return current == replace(request, dry_run=False)
+
+    def _set_task_editing_enabled(self, enabled: bool) -> None:
+        for panel in self._task_panels:
+            panel.setEnabled(enabled)
+        for action in self._task_actions:
+            action.setEnabled(enabled)
+        self._auth_mode_changed()
 
     def _mode_changed(self, checked: bool, mode: SyncMode) -> None:
         if checked:
             is_mirror = mode is SyncMode.MIRROR
             self.mode_warning.setText("⚠ 镜像会删除 Destination 中多余文件，执行前必须预览并确认。" if is_mirror else "")
             self.mode_warning.setVisible(is_mirror)
-            self._preview_completed = False
+            self._invalidate_preview()
 
     def _auth_mode_changed(self) -> None:
         self.credential.setEnabled(self.auth_mode.currentData() == "auto")
@@ -501,15 +539,30 @@ class MainWindow(QMainWindow):
     def _start_sync(self) -> None:
         if self._worker is not None:
             return
-        if self.mirror.isChecked() and not self._preview_completed:
-            request = self._request(True)
-            if request:
-                self._pending_mirror = True
-                self._start_worker(request)
-            return
         request = self._request(False)
-        if request:
-            self._start_worker(request)
+        if request is None:
+            return
+        if request.mode is SyncMode.MIRROR:
+            if self._preview_request != replace(request, dry_run=True):
+                self._pending_mirror = True
+                self._start_worker(replace(request, dry_run=True))
+                return
+            _transferred, deletions = self._sync_counts(self._preview_output)
+            count = str(deletions) if deletions is not None else "未知"
+            text = (
+                f"方向：{request.direction.label}\n本地：{request.local_path}\n"
+                f"远程：{request.remote_host}:{request.remote_path}\n\n"
+                f"将删除 {count} 个目标端文件。\n确认执行镜像同步？"
+            )
+            if QMessageBox.warning(self, "确认镜像同步", text, QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+                return
+            if not self._form_matches_request(request) or self._preview_request != replace(request, dry_run=True):
+                self._invalidate_preview()
+                self.statusBar().showMessage("任务参数已变化，请重新预览。", 8000)
+                return
+        self._pending_mirror = False
+        self._invalidate_preview()
+        self._start_worker(request)
 
     def _start_worker(self, request: SyncRequest) -> None:
         credential = self.credentials.get(self.credential.currentData() or "")
@@ -517,6 +570,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "缺少凭据", "自动认证请选择一个已保存的凭据，或切换为手工输入。")
             return
         command = build_command(request)
+        self._start_after_cleanup = False
         self._current_request = request
         self._preview_output = ""
         self._run_number += 1
@@ -539,6 +593,7 @@ class MainWindow(QMainWindow):
         self.cancel_button.setEnabled(True)
         self.preview_button.setEnabled(False)
         self.sync_button.setEnabled(False)
+        self._set_task_editing_enabled(False)
         self._thread = QThread(self)
         self._worker = SyncWorker(command, self.auth_mode.currentData(), credential, request.dry_run, self._totp_replay_guard)
         self._worker.moveToThread(self._thread)
@@ -546,6 +601,7 @@ class MainWindow(QMainWindow):
         self._worker.output.connect(self._append_log)
         self._worker.status.connect(self._status_changed)
         self._worker.prompt.connect(self._password_prompt)
+        self._worker.host_key_prompt.connect(self._host_key_prompt)
         self._worker.notice.connect(self._append_notice)
         self._worker.finished.connect(self._worker_finished)
         self._worker.finished.connect(self._thread.quit)
@@ -672,8 +728,8 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _sync_counts(output: str) -> tuple[int | None, int | None]:
         def stat(name: str) -> int | None:
-            match = re.search(rf"(?im)^\s*{re.escape(name)}:\s*(\d+)\b", output)
-            return int(match.group(1)) if match else None
+            match = re.search(rf"(?im)^\s*{re.escape(name)}:\s*([\d,]+)\b", output)
+            return int(match.group(1).replace(",", "")) if match else None
 
         transferred = stat("Number of regular files transferred")
         deleted = stat("Number of deleted files")
@@ -776,8 +832,26 @@ class MainWindow(QMainWindow):
         dialog = PasswordDialog(prompt, self)
         self._worker.answer(dialog.value())
 
+    @Slot(str)
+    def _host_key_prompt(self, prompt: str) -> None:
+        worker = self._worker
+        if worker is None:
+            return
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("确认 SSH 主机指纹")
+        dialog.setIcon(QMessageBox.Warning)
+        dialog.setTextFormat(Qt.PlainText)
+        dialog.setText(prompt)
+        dialog.setInformativeText("请与集群管理员提供的指纹核对，确认匹配后再接受此主机。")
+        dialog.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        dialog.setDefaultButton(QMessageBox.No)
+        worker.answer_host_key(dialog.exec() == QMessageBox.Yes)
+
     def _cancel(self) -> None:
         if self._worker is not None:
+            self._pending_mirror = False
+            self._start_after_cleanup = False
+            self._invalidate_preview()
             self._worker.cancel()
             self.status_label.setText(RunStatus.CANCELLED.value)
             self._clear_current_file()
@@ -833,17 +907,15 @@ class MainWindow(QMainWindow):
         record = HistoryRecord(self._current_profile_name, request.local_path, request.remote_host, request.remote_path, request.direction.value, request.mode.value, request.dry_run, result.status.value, result.exit_code, result.duration, result.output, start_time=result.start_time, end_time=result.end_time)
         self.db.add_history(record)
         self.db.cleanup_history()
-        if request.dry_run and result.status is RunStatus.SUCCESS:
+        pending_mirror = self._pending_mirror
+        self._pending_mirror = False
+        self._invalidate_preview()
+        if request.dry_run and result.status is RunStatus.SUCCESS and self._form_matches_request(request):
             self._preview_output = result.output
             self._preview_completed = True
-            if self._pending_mirror:
-                self._pending_mirror = False
-                _transferred, deletions = self._sync_counts(result.output)
-                deletions = deletions or 0
-                text = f"预览完成。\n\n将删除 {deletions} 个文件。\n\n确认执行镜像同步？" if deletions else "预览完成，未发现待删除文件。\n\n确认执行镜像同步？"
-                if QMessageBox.warning(self, "确认镜像同步", text, QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes:
-                    self._preview_completed = True
-                    self._start_after_cleanup = True
+            self._preview_request = replace(request)
+            if pending_mirror:
+                self._start_after_cleanup = True
         self._clear_current_file()
         self._reset_transfer_info()
         self.status_label.setText(result.status.value)
@@ -860,6 +932,7 @@ class MainWindow(QMainWindow):
         self.cancel_button.setEnabled(False)
         self.preview_button.setEnabled(True)
         self.sync_button.setEnabled(True)
+        self._set_task_editing_enabled(True)
         if self._start_after_cleanup:
             self._start_after_cleanup = False
             QTimer.singleShot(0, self._start_sync)
@@ -870,7 +943,11 @@ class MainWindow(QMainWindow):
             Path(path).write_text(self.log.toPlainText(), encoding="utf-8")
 
     def _open_credentials(self) -> None:
-        dialog = CredentialsDialog(self.credential_store, self)
+        try:
+            dialog = CredentialsDialog(self.credential_store, self)
+        except RuntimeError as exc:
+            QMessageBox.warning(self, "无法打开凭据管理", f"{exc}\n请修复 {self.credential_store.path} 后重试；原文件未修改，可继续使用手工认证。")
+            return
         dialog.credentials_changed.connect(self._refresh_credentials)
         dialog.exec()
 

@@ -32,7 +32,7 @@ def test_dialog_loads_only_main_config_file(application, config):
         assert str(config) in dialog.path_label.text()
         assert dialog.editor.toPlainText() == config.read_text(encoding="utf-8")
     finally:
-        dialog.close()
+        dialog.done(0)
 
 
 def test_save_creates_backup_and_emits_signal(application, config, monkeypatch):
@@ -53,7 +53,7 @@ def test_save_creates_backup_and_emits_signal(application, config, monkeypatch):
         assert saved == [True]
         assert not dialog.isWindowModified()
     finally:
-        dialog.close()
+        dialog.done(0)
 
 
 def test_invalid_config_is_rejected_without_writing(application, config, monkeypatch):
@@ -71,7 +71,7 @@ def test_invalid_config_is_rejected_without_writing(application, config, monkeyp
         assert config.read_text(encoding="utf-8") == original
         assert warnings and "第 1 行" in warnings[0]
     finally:
-        dialog.close()
+        dialog.done(0)
 
 
 def test_external_change_requires_confirmation_before_overwrite(application, config, monkeypatch):
@@ -93,21 +93,22 @@ def test_external_change_requires_confirmation_before_overwrite(application, con
         assert config.read_text(encoding="utf-8") == "Host from-other-process\n"
         assert questions and str(config) in questions[0]
     finally:
-        dialog.close()
+        dialog.done(0)
 
 
-def test_cancel_does_not_write_editor_contents(application, config):
+def test_cancel_does_not_write_editor_contents(application, config, monkeypatch):
     from app.dialogs import HostConfigDialog
 
     dialog = HostConfigDialog()
     original = config.read_text(encoding="utf-8")
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.Discard)
     try:
         dialog.editor.setPlainText("Host unsaved\n")
         dialog.reject()
 
         assert config.read_text(encoding="utf-8") == original
     finally:
-        dialog.close()
+        dialog.done(0)
 
 
 def test_snapshot_read_failure_is_reported_without_writing(application, config, monkeypatch):
@@ -127,7 +128,7 @@ def test_snapshot_read_failure_is_reported_without_writing(application, config, 
         assert config.read_text(encoding="utf-8") == original
         assert warnings and "read failed" in warnings[0]
     finally:
-        dialog.close()
+        dialog.done(0)
 
 
 def test_reload_after_external_change_can_discard_local_edits(application, config, monkeypatch):
@@ -145,7 +146,7 @@ def test_reload_after_external_change_can_discard_local_edits(application, confi
         assert dialog.editor.toPlainText() == "Host external\n"
         assert not dialog.editor.document().isModified()
     finally:
-        dialog.close()
+        dialog.done(0)
 
 
 def test_save_confirmation_shows_both_paths_and_can_cancel(application, config, monkeypatch):
@@ -164,4 +165,4 @@ def test_save_confirmation_shows_both_paths_and_can_cancel(application, config, 
         assert questions and str(config) in questions[0]
         assert str(config.with_name("config.bak")) in questions[0]
     finally:
-        dialog.close()
+        dialog.done(0)

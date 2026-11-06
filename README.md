@@ -16,7 +16,7 @@ rsync -avzP --stats --itemize-changes -- hpc-alias:/path/to/remote/project/ /pat
 | --- | --- |
 | 普通同步 | 执行上述命令，增量传输新增或变化的文件，不删除目标端多余文件 |
 | 预览 | 增加 `--dry-run`，查看预计变化，不实际传输或删除 |
-| 强制镜像 | 增加 `--delete`，**删除目标目录中源目录没有的文件**；执行前需要预览并确认 |
+| 强制镜像 | 增加 `--delete`，**删除目标目录中源目录没有的文件**；每次执行前都需要预览并确认，运行期间锁定任务参数 |
 
 程序同步的是**目录里的内容**，会自动补齐路径末尾的 `/`。
 
@@ -25,7 +25,7 @@ rsync -avzP --stats --itemize-changes -- hpc-alias:/path/to/remote/project/ /pat
 适用于 **Ubuntu 22.04 及以上的 amd64 桌面系统**。从 [Releases](https://github.com/2489055825/NJU-HPC_Sync/releases/latest) 下载 `.deb` 安装包，在下载目录执行：
 
 ```bash
-sudo apt install ./nju-hpc-sync_1.0.4_amd64.deb
+sudo apt install ./nju-hpc-sync_1.0.5_amd64.deb
 nju-hpc-sync
 ```
 
@@ -48,6 +48,8 @@ Host hpc-alias
 - `HostName`、`User`、`Port`：替换为集群提供的登录地址、账号和 SSH 端口。
 
 点击“保存”并确认，软件会备份为 `~/.ssh/config.bak`，自动刷新 Host 列表。**已有 SSH Host 配置可直接使用，无需重复添加。** 列表也会读取 `Include` 子文件；Host 管理只编辑主文件。
+
+首次连接出现主机指纹提示时，请先与管理员提供的指纹核对，再选择接受。Host 编辑器有未保存修改时，关闭会询问保存、放弃或取消。
 
 ### 2. 选择认证方式：告诉软件怎么登录
 
@@ -96,6 +98,7 @@ Host hpc-alias
 | --- | --- |
 | Host 下拉框为空 | 是否写了具体的 `Host hpc-alias`，并保存、刷新；`Host *` 不会作为可选主机 |
 | 提示缺少凭据 | 自动 TOTP 模式需要选已保存的凭据；手工登录请切换“认证方式” |
+| 凭据读取失败 | 软件会提示并切换为手工认证，原凭据文件不会被改写；修复文件后可重新打开凭据管理 |
 | SSH 连接或认证失败 | 可先在终端用 `ssh hpc-alias` 核对地址、账号、端口、网络及密码格式 |
 
 保存的密码和 TOTP Secret 位于本机 `~/.config/nju-hpc-sync/credentials.json`，不要分享该文件。Profile 和历史位于 `~/.local/share/nju-hpc-sync/nju-hpc-sync.sqlite3`。

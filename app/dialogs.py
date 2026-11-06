@@ -366,6 +366,7 @@ class CredentialsDialog(QDialog):
         root.addLayout(right, 2)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._refresh_code)
+        self.finished.connect(self.timer.stop)
         self.timer.start(1000)
         self._refresh_list()
 

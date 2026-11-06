@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import threading
 from typing import Callable, Protocol
 
 from .models import Credential
-from .totp import TotpConfig, TotpReplayGuard, TotpSession
+from .totp import TotpCancelled, TotpConfig, TotpReplayGuard, TotpSession
 
 
 class AuthenticationCancelled(Exception):
@@ -29,7 +30,7 @@ class ManualAuthProvider:
 
 
 class AutoAuthProvider:
-    def __init__(self, credential: Credential, wait_notice: Callable[[str], None] | None = None, replay_guard: TotpReplayGuard | None = None):
+    def __init__(self, credential: Credential, wait_notice: Callable[[str], None] | None = None, replay_guard: TotpReplayGuard | None = None, cancel_event: threading.Event | None = None):
         if not credential.static_password:
             raise ValueError("自动认证需要固定密码")
         if not credential.totp_secret:
@@ -40,6 +41,7 @@ class AutoAuthProvider:
             credential.static_password,
             TotpConfig(credential.totp_secret, credential.totp_algorithm, credential.totp_period, credential.totp_digits),
             replay_guard=replay_guard,
+            cancel_event=cancel_event,
         )
         self._prompt_count = 0
 
@@ -49,7 +51,10 @@ class AutoAuthProvider:
         self._prompt_count += 1
         notice = "正在生成当前验证码…" if self._prompt_count == 1 else "检测到新的认证提示，正在生成新验证码…"
         self.wait_notice(notice)
-        return self.session.next_password()
+        try:
+            return self.session.next_password()
+        except TotpCancelled as exc:
+            raise AuthenticationCancelled("认证已取消") from exc
 
     def sensitive_values(self) -> list[str]:
         return [self.credential.static_password, self.credential.totp_secret]

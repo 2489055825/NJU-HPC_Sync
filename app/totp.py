@@ -74,35 +74,52 @@ class TotpReplayGuard:
             return True
 
 
+class TotpCancelled(Exception):
+    """Raised when a pending TOTP authentication is cancelled."""
+
+
 class TotpSession:
     """Generate passwords without reusing a TOTP time window."""
 
-    def __init__(self, static_password: str, config: TotpConfig, safety_seconds: int = 3, clock: Callable[[], float] = time.time, sleeper: Callable[[float], None] = time.sleep, replay_guard: TotpReplayGuard | None = None):
+    def __init__(self, static_password: str, config: TotpConfig, safety_seconds: int = 3, clock: Callable[[], float] = time.time, sleeper: Callable[[float], None] = time.sleep, replay_guard: TotpReplayGuard | None = None, cancel_event: threading.Event | None = None):
         self.static_password = static_password
         self.config = config
         self.safety_seconds = safety_seconds
         self.clock = clock
         self.sleeper = sleeper
         self.replay_guard = replay_guard
+        self.cancel_event = cancel_event
         self.last_used_counter: int | None = None
         self.last_used_totp: str | None = None
 
     def next_password(self) -> str:
         while True:
+            self._check_cancelled()
             now = self.clock()
             counter = int(now // self.config.period)
             remaining = self.config.period - (now % self.config.period)
             if remaining <= self.safety_seconds or counter == self.last_used_counter:
                 wait_for = max(0.05, remaining + 0.05 if counter == self.last_used_counter else remaining + 0.05)
-                self.sleeper(wait_for)
+                self._wait(wait_for)
                 continue
             code = generate_code(self.config, now)
             if self.replay_guard is not None and not self.replay_guard.claim(self.config, counter):
-                self.sleeper(max(0.05, remaining + 0.05))
+                self._wait(max(0.05, remaining + 0.05))
                 continue
             self.last_used_counter = counter
             self.last_used_totp = code
+            self._check_cancelled()
             return f"{self.static_password} {code}"
+
+    def _check_cancelled(self) -> None:
+        if self.cancel_event is not None and self.cancel_event.is_set():
+            raise TotpCancelled()
+
+    def _wait(self, delay: float) -> None:
+        if self.cancel_event is None:
+            self.sleeper(delay)
+        elif self.cancel_event.wait(delay):
+            raise TotpCancelled()
 
     def current(self) -> tuple[str, int]:
         now = self.clock()

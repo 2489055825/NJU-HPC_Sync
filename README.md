@@ -25,7 +25,7 @@ rsync -avzP --stats --itemize-changes -- hpc-alias:/path/to/remote/project/ /pat
 适用于 **Ubuntu 22.04 及以上的 amd64 桌面系统**。从 [Releases](https://github.com/2489055825/NJU-HPC_Sync/releases/latest) 下载 `.deb` 安装包，在下载目录执行：
 
 ```bash
-sudo apt install ./nju-hpc-sync_1.0.5_amd64.deb
+sudo apt install ./nju-hpc-sync_1.0.6_amd64.deb
 nju-hpc-sync
 ```
 
@@ -88,7 +88,7 @@ Host hpc-alias
 1. 选择 Profile，确认本地目录、远程目录、凭据和认证方式。
 2. 选择方向：**Local → NJU-HPC** 是上传，**NJU-HPC → Local** 是下载。
 3. 点击 **预览**，核对文件变化；确认无误后点击 **开始同步**。使用强制镜像时，务必核对删除提示。
-4. 在主界面查看当前文件、进度和日志；需要中止时点击 **停止**。过往结果在 **管理 → 同步历史** 中查看。
+4. 在主界面查看当前文件、进度和日志；需要中止时点击 **停止**，等待验证码期间也可以取消。任务运行时关闭窗口，会先停止任务并保存结果，再自动关闭。过往结果在 **管理 → 同步历史** 中查看。
 
 以后选择已保存的 Profile，检查方向和认证方式后，按同样步骤执行即可。
 

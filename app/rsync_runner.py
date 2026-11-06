@@ -11,6 +11,7 @@ from typing import Callable, Iterable, Optional
 import pexpect
 
 from .models import RunResult, RunStatus
+from .auth import AuthenticationCancelled
 from .paths import StreamingRedactor, redact_text
 
 
@@ -35,10 +36,10 @@ class RunnerCallbacks:
 class RsyncRunner:
     """Run one rsync process under a PTY without invoking a shell."""
 
-    def __init__(self) -> None:
+    def __init__(self, cancel_event: threading.Event | None = None) -> None:
         self._child: pexpect.spawn | None = None
         self._lock = threading.Lock()
-        self._cancel_requested = False
+        self._cancel_event = cancel_event if cancel_event is not None else threading.Event()
         self._secrets: list[str] = []
 
     @property
@@ -46,8 +47,8 @@ class RsyncRunner:
         return self._child.pid if self._child is not None else None
 
     def cancel(self) -> None:
+        self._cancel_event.set()
         with self._lock:
-            self._cancel_requested = True
             child = self._child
         if child is None or not child.isalive():
             return
@@ -62,15 +63,24 @@ class RsyncRunner:
     def run(self, command: list[str], callbacks: RunnerCallbacks | None = None, secrets: Iterable[str] = (), preflight: bool = True) -> RunResult:
         callbacks = callbacks or RunnerCallbacks()
         self._secrets = [secret for secret in secrets if secret]
-        self._cancel_requested = False
         started = time.monotonic()
         start_time = datetime.now(timezone.utc).isoformat(timespec="seconds")
         output_parts: list[str] = []
         redactor = StreamingRedactor(self._secrets)
 
         def emit_status(status: RunStatus) -> None:
-            if callbacks.on_status:
+            if callbacks.on_status and (not self._cancel_event.is_set() or status is RunStatus.CANCELLED):
                 callbacks.on_status(status)
+
+        def check_cancelled() -> None:
+            if self._cancel_event.is_set():
+                raise RunnerCancelled()
+
+        def send_response(value: str) -> None:
+            # Keep pexpect's usual echo-disable grace period cancellable.
+            if self._cancel_event.wait(0.05):
+                raise RunnerCancelled()
+            child.sendline(value)
 
         def emit_output(value: str, *, final: bool = False) -> None:
             safe = redactor.feed(value, final=final)
@@ -81,14 +91,15 @@ class RsyncRunner:
 
         emit_status(RunStatus.CONNECTING)
         try:
-            self._child = pexpect.spawn(command[0], command[1:], encoding="utf-8", codec_errors="replace", timeout=0.25)
-            child = self._child
+            check_cancelled()
+            child = pexpect.spawn(command[0], command[1:], encoding="utf-8", codec_errors="replace", timeout=0.25)
+            child.delaybeforesend = 0
+            with self._lock:
+                self._child = child
+            check_cancelled()
             emitted_buffer = ""
             while True:
-                with self._lock:
-                    cancelled = self._cancel_requested
-                if cancelled:
-                    raise RunnerCancelled()
+                check_cancelled()
                 index = child.expect([HOST_KEY_PATTERN, PROMPT_PATTERN, pexpect.EOF, pexpect.TIMEOUT])
                 before = child.before or ""
                 if before:
@@ -102,11 +113,12 @@ class RsyncRunner:
                 if index in {0, 1}:
                     # A successful match consumes `before` and the prompt.
                     emitted_buffer = ""
+                    check_cancelled()
                     if index == 0:
                         prompt = redact_text(before[-4096:] + (child.after or ""), self._secrets)
                         if callbacks.on_host_key is None or not callbacks.on_host_key(prompt):
                             raise RunnerCancelled()
-                        child.sendline("yes")
+                        send_response("yes")
                         emit_status(RunStatus.CONNECTING)
                         continue
                     prompt = child.after or "Password:"
@@ -116,8 +128,9 @@ class RsyncRunner:
                     password = callbacks.on_prompt(prompt)
                     if password is None:
                         raise RunnerCancelled()
+                    check_cancelled()
                     self._secrets.append(password)
-                    child.sendline(password)
+                    send_response(password)
                     del password
                     emit_status(RunStatus.TRANSFERRING)
                     continue
@@ -129,10 +142,8 @@ class RsyncRunner:
             code = child.exitstatus
             if code is None:
                 code = child.signalstatus and 128 + child.signalstatus or 0
-            with self._lock:
-                cancelled = self._cancel_requested
-            status = RunStatus.CANCELLED if cancelled else (RunStatus.SUCCESS if code == 0 else RunStatus.FAILED)
-        except RunnerCancelled:
+            status = RunStatus.CANCELLED if self._cancel_event.is_set() else (RunStatus.SUCCESS if code == 0 else RunStatus.FAILED)
+        except (RunnerCancelled, AuthenticationCancelled):
             self.cancel()
             if self._child is not None:
                 try:
@@ -152,6 +163,8 @@ class RsyncRunner:
             safe_output = redact_text("".join(output_parts), self._secrets)
             if self._child is not None and self._child.isalive():
                 self._child.close(force=True)
+            if self._cancel_event.is_set():
+                status = RunStatus.CANCELLED
             emit_status(status)
             end_time = datetime.now(timezone.utc).isoformat(timespec="seconds")
             self._child = None

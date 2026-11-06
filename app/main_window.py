@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .auth import AutoAuthProvider
+from .auth import AuthenticationCancelled, AutoAuthProvider
 from .credential_store import CredentialStore
 from .database import Database
 from .dialogs import CredentialsDialog, HistoryDialog, HostConfigDialog, LogManagementDialog, PasswordDialog, ProfileDialog, UsageDialog
@@ -45,20 +45,24 @@ from .totp import TotpReplayGuard
 
 
 class PromptBroker:
-    def __init__(self, request_signal: Signal):
+    def __init__(self, request_signal: Signal, cancel_event: threading.Event | None = None):
         self._condition = threading.Condition()
         self._response: str | None = None
         self._waiting = False
         self._request_signal = request_signal
+        self._cancel_event = cancel_event if cancel_event is not None else threading.Event()
 
     def request(self, prompt: str) -> str | None:
         with self._condition:
+            if self._cancel_event.is_set():
+                return None
             self._response = None
             self._waiting = True
             self._request_signal.emit(prompt)
             self._condition.wait_for(lambda: not self._waiting, timeout=600)
             response = self._response
             self._response = None
+            self._waiting = False
             return response
 
     def answer(self, value: str | None) -> None:
@@ -121,19 +125,22 @@ class SyncWorker(QObject):
         self.credential = credential
         self.dry_run = dry_run
         self.replay_guard = replay_guard
-        self.runner = RsyncRunner()
-        self.broker = PromptBroker(self.prompt)
-        self.host_key_broker = PromptBroker(self.host_key_prompt)
+        self.cancel_event = threading.Event()
+        self.runner = RsyncRunner(self.cancel_event)
+        self.broker = PromptBroker(self.prompt, self.cancel_event)
+        self.host_key_broker = PromptBroker(self.host_key_prompt, self.cancel_event)
 
     @Slot()
     def run(self) -> None:
         provider = None
         secrets: list[str] = []
         try:
+            if self.cancel_event.is_set():
+                raise AuthenticationCancelled("任务已取消")
             if self.auth_mode == "auto":
                 if self.credential is None:
                     raise ValueError("自动认证需要选择凭据")
-                provider = AutoAuthProvider(self.credential, self.notice.emit, self.replay_guard)
+                provider = AutoAuthProvider(self.credential, self.notice.emit, self.replay_guard, cancel_event=self.cancel_event)
                 secrets = provider.sensitive_values()
             else:
                 provider = self.broker.request
@@ -145,6 +152,8 @@ class SyncWorker(QObject):
                 on_host_key=lambda prompt: self.host_key_broker.request(prompt) == "yes",
             )
             result = self.runner.run(self.command, callbacks, secrets=secrets, preflight=False)
+        except AuthenticationCancelled:
+            result = RunResult(RunStatus.CANCELLED, None, "", "", "", 0.0, self.command)
         except Exception as exc:
             self.output.emit(f"{type(exc).__name__}: {exc}\n")
             result = RunResult(RunStatus.FAILED, None, f"{type(exc).__name__}: {exc}\n", "", "", 0.0, self.command)
@@ -154,6 +163,7 @@ class SyncWorker(QObject):
         self.broker.answer(value)
 
     def cancel(self) -> None:
+        self.cancel_event.set()
         self.broker.answer(None)
         self.host_key_broker.answer(None)
         self.runner.cancel()
@@ -171,9 +181,13 @@ class MainWindow(QMainWindow):
         self.db.cleanup_history()
         self.credential_store = credentials or CredentialStore()
         self.credentials = {}
+        self._credential_error = ""
         self._profiles: list[Profile] = []
         self._thread: QThread | None = None
         self._worker: SyncWorker | None = None
+        self._cancel_pending = False
+        self._closing = False
+        self._active_prompt_dialog = None
         self._current_request: SyncRequest | None = None
         self._current_profile_name = ""
         self._pending_mirror = False
@@ -189,6 +203,8 @@ class MainWindow(QMainWindow):
         self._totp_replay_guard = TotpReplayGuard()
         self._build_ui()
         self._load_profiles()
+        if self._credential_error:
+            self.statusBar().showMessage(self._credential_error, 8000)
 
     def _build_ui(self) -> None:
         self.profile_list = QListWidget()
@@ -401,11 +417,13 @@ class MainWindow(QMainWindow):
                 )
 
     def _refresh_credentials(self) -> None:
+        self._credential_error = ""
         try:
             self.credentials = self.credential_store.load()
         except RuntimeError as exc:
             self.credentials = {}
-            self.statusBar().showMessage(str(exc), 8000)
+            self._credential_error = str(exc)
+            self.statusBar().showMessage(self._credential_error, 8000)
             self.auth_mode.setCurrentIndex(self.auth_mode.findData("manual"))
         selected = self.credential.currentData() if hasattr(self, "credential") else ""
         self.credential.clear()
@@ -434,6 +452,10 @@ class MainWindow(QMainWindow):
         index = self.credential.findData(profile.credential_name)
         self.credential.setCurrentIndex(index if index >= 0 else 0)
         self._invalidate_preview()
+        self.status_label.setText(RunStatus.WAITING.value)
+        self._clear_current_file()
+        self._reset_transfer_info()
+        self.statusBar().clearMessage()
 
     def _new_profile(self) -> None:
         dialog = ProfileDialog(self, credential_names=list(self.credentials))
@@ -531,13 +553,15 @@ class MainWindow(QMainWindow):
             return None
 
     def _preview(self) -> None:
+        if self._worker is not None or self._closing:
+            return
         request = self._request(True)
         if request:
             self._pending_mirror = False
             self._start_worker(request)
 
     def _start_sync(self) -> None:
-        if self._worker is not None:
+        if self._worker is not None or self._closing:
             return
         request = self._request(False)
         if request is None:
@@ -565,11 +589,14 @@ class MainWindow(QMainWindow):
         self._start_worker(request)
 
     def _start_worker(self, request: SyncRequest) -> None:
+        if self._worker is not None or self._closing:
+            return
         credential = self.credentials.get(self.credential.currentData() or "")
         if self.auth_mode.currentData() == "auto" and credential is None:
             QMessageBox.warning(self, "缺少凭据", "自动认证请选择一个已保存的凭据，或切换为手工输入。")
             return
         command = build_command(request)
+        self._cancel_pending = False
         self._start_after_cleanup = False
         self._current_request = request
         self._preview_output = ""
@@ -605,6 +632,7 @@ class MainWindow(QMainWindow):
         self._worker.notice.connect(self._append_notice)
         self._worker.finished.connect(self._worker_finished)
         self._worker.finished.connect(self._thread.quit)
+        self._thread.finished.connect(self._worker.deleteLater)
         self._thread.finished.connect(self._thread_cleanup)
         self._thread.start()
 
@@ -630,7 +658,7 @@ class MainWindow(QMainWindow):
 
     def _process_output_line(self, line: str) -> None:
         change = self._parse_itemized_change(line)
-        if change and change[1]:
+        if not self._cancel_pending and change and change[1]:
             self._set_current_file(change[1])
             if change[0] in {"add", "update"}:
                 self._transfer_index += 1
@@ -668,6 +696,8 @@ class MainWindow(QMainWindow):
             self.transfer_count.setText(f"{self._transfer_index} / {self._transfer_total}")
 
     def _update_transfer_progress(self, progress: tuple[int, int, str, int | None, int | None]) -> None:
+        if self._cancel_pending:
+            return
         transferred, percent, speed, file_number, total_entries = progress
         if file_number is not None:
             self._transfer_index = max(self._transfer_index, file_number)
@@ -809,6 +839,8 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _status_changed(self, status: str) -> None:
+        if self._cancel_pending and status != RunStatus.CANCELLED.value:
+            return
         self.status_label.setText(status)
         if status in {RunStatus.SUCCESS.value, RunStatus.FAILED.value, RunStatus.CANCELLED.value}:
             self._clear_current_file()
@@ -827,15 +859,23 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _password_prompt(self, prompt: str) -> None:
-        if self._worker is None:
+        worker = self._worker
+        if worker is None or self._cancel_pending:
             return
         dialog = PasswordDialog(prompt, self)
-        self._worker.answer(dialog.value())
+        self._active_prompt_dialog = dialog
+        try:
+            value = dialog.value()
+            if self._worker is worker and not self._cancel_pending:
+                worker.answer(value)
+        finally:
+            self._active_prompt_dialog = None
+            dialog.deleteLater()
 
     @Slot(str)
     def _host_key_prompt(self, prompt: str) -> None:
         worker = self._worker
-        if worker is None:
+        if worker is None or self._cancel_pending:
             return
         dialog = QMessageBox(self)
         dialog.setWindowTitle("确认 SSH 主机指纹")
@@ -845,24 +885,37 @@ class MainWindow(QMainWindow):
         dialog.setInformativeText("请与集群管理员提供的指纹核对，确认匹配后再接受此主机。")
         dialog.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
         dialog.setDefaultButton(QMessageBox.No)
-        worker.answer_host_key(dialog.exec() == QMessageBox.Yes)
+        self._active_prompt_dialog = dialog
+        try:
+            accepted = dialog.exec() == QMessageBox.Yes
+            if self._worker is worker and not self._cancel_pending:
+                worker.answer_host_key(accepted)
+        finally:
+            self._active_prompt_dialog = None
+            dialog.deleteLater()
 
     def _cancel(self) -> None:
         if self._worker is not None:
+            self._cancel_pending = True
             self._pending_mirror = False
             self._start_after_cleanup = False
             self._invalidate_preview()
             self._worker.cancel()
-            self.status_label.setText(RunStatus.CANCELLED.value)
+            if self._active_prompt_dialog is not None:
+                self._active_prompt_dialog.reject()
+            self.status_label.setText("正在停止…")
+            self.cancel_button.setEnabled(False)
             self._clear_current_file()
             self._reset_transfer_info()
-            self.statusBar().clearMessage()
+            self.statusBar().showMessage("正在取消当前任务…")
 
     @Slot(object)
     def _worker_finished(self, result: RunResult) -> None:
         request = self._current_request
         if request is None:
             return
+        if self._cancel_pending:
+            result = replace(result, status=RunStatus.CANCELLED)
         self._flush_log_pending()
         transferred, deleted = self._sync_counts(result.output)
         total_entries = self._total_entries(result.output)
@@ -924,11 +977,14 @@ class MainWindow(QMainWindow):
     def _thread_cleanup(self) -> None:
         if self._thread is not None:
             self._thread.deleteLater()
-        if self._worker is not None:
-            self._worker.deleteLater()
         self._thread = None
         self._worker = None
         self._current_request = None
+        if self._closing:
+            self._start_after_cleanup = False
+            QTimer.singleShot(0, self.close)
+            return
+        self._cancel_pending = False
         self.cancel_button.setEnabled(False)
         self.preview_button.setEnabled(True)
         self.sync_button.setEnabled(True)
@@ -949,7 +1005,11 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "无法打开凭据管理", f"{exc}\n请修复 {self.credential_store.path} 后重试；原文件未修改，可继续使用手工认证。")
             return
         dialog.credentials_changed.connect(self._refresh_credentials)
-        dialog.exec()
+        try:
+            dialog.exec()
+        finally:
+            dialog.timer.stop()
+            dialog.deleteLater()
 
     def _open_host_manager(self) -> None:
         dialog = HostConfigDialog(self)
@@ -972,10 +1032,11 @@ class MainWindow(QMainWindow):
         UsageDialog(self).exec()
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        if self._worker is not None:
-            self._worker.cancel()
-            if self._thread is not None:
-                self._thread.quit()
-                self._thread.wait(3000)
+        if self._worker is not None or self._thread is not None:
+            self._closing = True
+            self._cancel()
+            self.statusBar().showMessage("正在停止任务，完成清理后自动关闭…")
+            event.ignore()
+            return
         self.db.close()
         event.accept()

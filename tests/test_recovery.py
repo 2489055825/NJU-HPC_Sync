@@ -84,3 +84,58 @@ def test_failed_save_on_close_retains_editor_draft(home, monkeypatch):
         assert (home / ".ssh/config").read_text(encoding="utf-8") == "Host example\n"
     finally:
         dialog.done(0)
+
+
+def test_credential_save_failure_preserves_disk_and_editor_state(home, monkeypatch):
+    from app.dialogs import CredentialsDialog
+    from app.models import Credential
+
+    path = home / "credentials.json"
+    store = CredentialStore(path)
+    store.save({"original": Credential("original", "static", "JBSWY3DPEHPK3PXP")})
+    original_bytes = path.read_bytes()
+    dialog = CredentialsDialog(store)
+    changed = []
+    warnings = []
+    dialog.credentials_changed.connect(lambda: changed.append(True))
+    dialog.name.setText("renamed")
+    monkeypatch.setattr(store, "save", lambda _credentials: (_ for _ in ()).throw(OSError("disk full")))
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args: warnings.append(args[-1]))
+    try:
+        dialog._save()
+
+        assert warnings and "disk full" in warnings[0]
+        assert path.read_bytes() == original_bytes
+        assert list(dialog.credentials) == ["original"]
+        assert dialog._editing_name == "original"
+        assert dialog.name.text() == "renamed"
+        assert changed == []
+    finally:
+        dialog.done(0)
+
+
+def test_credential_delete_failure_preserves_disk_and_dialog_state(home, monkeypatch):
+    from app.dialogs import CredentialsDialog
+    from app.models import Credential
+
+    path = home / "credentials.json"
+    store = CredentialStore(path)
+    store.save({"original": Credential("original", "static", "JBSWY3DPEHPK3PXP")})
+    original_bytes = path.read_bytes()
+    dialog = CredentialsDialog(store)
+    changed = []
+    warnings = []
+    dialog.credentials_changed.connect(lambda: changed.append(True))
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.Yes)
+    monkeypatch.setattr(store, "save", lambda _credentials: (_ for _ in ()).throw(OSError("read-only filesystem")))
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args: warnings.append(args[-1]))
+    try:
+        dialog._delete()
+
+        assert warnings and "read-only filesystem" in warnings[0]
+        assert path.read_bytes() == original_bytes
+        assert list(dialog.credentials) == ["original"]
+        assert dialog.list.currentItem().text() == "original"
+        assert changed == []
+    finally:
+        dialog.done(0)

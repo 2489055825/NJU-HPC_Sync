@@ -1,4 +1,7 @@
+import sqlite3
 from datetime import datetime, timezone
+
+import pytest
 
 from app.database import Database
 from app.models import Direction, HistoryRecord, Profile, RunStatus, SyncMode
@@ -18,7 +21,36 @@ def test_profiles_and_history_round_trip(tmp_path):
     record = HistoryRecord("NJU test", "/tmp/a", "nju", "/fsb/a", Direction.UPLOAD.value, SyncMode.NORMAL.value, False, RunStatus.SUCCESS.value, 0, 1.25, "safe log", start_time="2026-01-01T00:00:00+00:00", end_time="2026-01-01T00:00:01+00:00")
     db.add_history(record)
     assert db.list_history()[0].log == "safe log"
+    assert db.get_history(record.id).log == "safe log"
+    assert db.get_history(99999) is None
     db.close()
+
+
+def test_profile_update_delete_and_missing_lookup(tmp_path):
+    with Database(tmp_path / "app.sqlite3") as db:
+        profile = db.save_profile(Profile("NJU test", "/tmp/a", "nju", "/fsb/a"))
+        assert db.get_profile(99999) is None
+
+        profile.name = "NJU renamed"
+        db.save_profile(profile)
+        assert db.get_profile(profile.id).name == "NJU renamed"
+
+        db.delete_profile(profile.id)
+        assert db.get_profile(profile.id) is None
+
+
+def test_duplicate_profile_name_is_rejected(tmp_path):
+    with Database(tmp_path / "app.sqlite3") as db:
+        db.save_profile(Profile("NJU test", "/tmp/a", "nju", "/fsb/a"))
+
+        with pytest.raises(sqlite3.IntegrityError):
+            db.save_profile(Profile("NJU test", "/tmp/b", "other", "/fsb/b"))
+
+
+def test_invalid_log_retention_is_rejected(tmp_path):
+    with Database(tmp_path / "app.sqlite3") as db:
+        with pytest.raises(ValueError, match="大于 0"):
+            db.set_log_retention_days(0)
 
 
 def test_log_retention_defaults_to_60_days_and_cleans_expired_history(tmp_path):

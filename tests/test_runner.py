@@ -1,7 +1,9 @@
 import sys
 
+import pytest
+
 from app.models import RunStatus
-from app.rsync_runner import RunnerCallbacks, RsyncRunner
+from app.rsync_runner import RunnerCallbacks, RsyncRunner, friendly_exit_message
 
 
 def test_runner_handles_password_prompt_without_shell():
@@ -24,3 +26,17 @@ def test_runner_does_not_repeat_output_across_timeouts():
     assert result.output.count("sending incremental file list") == 1
     assert result.output.count("./") == 1
     assert result.output.count("unique-file.txt") == 1
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "expected"),
+    [
+        (0, "同步成功。"),
+        (23, "部分文件传输失败（rsync exit code 23）。请查看详细日志。"),
+        (24, "部分源文件在传输过程中消失（rsync exit code 24）。"),
+        (255, "SSH 连接或认证失败（rsync exit code 255）。请检查 Host、网络和认证信息。"),
+        (42, "同步失败（rsync exit code 42）。"),
+    ],
+)
+def test_friendly_exit_message_covers_known_and_unknown_codes(exit_code, expected):
+    assert friendly_exit_message(exit_code) == expected

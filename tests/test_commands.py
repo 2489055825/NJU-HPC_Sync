@@ -2,7 +2,7 @@ from pathlib import Path
 
 from app.models import Direction, SyncMode, SyncRequest
 from app.paths import redact_text
-from app.rsync_command import build_command
+from app.rsync_command import build_command, preflight
 
 
 def test_upload_uses_directory_contents_and_argv_paths():
@@ -28,3 +28,26 @@ def test_sync_counts_use_rsync_stats_and_include_empty_files():
 def test_redaction_handles_secrets_and_password_prompt():
     assert redact_text("Password: static 123456", ["static 123456"]) == "Password: [REDACTED]"
     assert redact_text("static 123456", ["static 123456"]) == "[REDACTED]"
+
+
+def test_preflight_reports_missing_rsync(monkeypatch):
+    request = SyncRequest("/tmp/source", "nju", "/remote")
+    monkeypatch.setattr("app.rsync_command.shutil.which", lambda _name: None)
+
+    result = preflight(request)
+
+    assert not result.ok
+    assert result.message == "找不到 rsync，请先安装 rsync"
+
+
+def test_preflight_reports_missing_ssh(monkeypatch):
+    request = SyncRequest("/tmp/source", "nju", "/remote")
+    monkeypatch.setattr(
+        "app.rsync_command.shutil.which",
+        lambda name: "/usr/bin/rsync" if name == "rsync" else None,
+    )
+
+    result = preflight(request)
+
+    assert not result.ok
+    assert result.message == "找不到 ssh，请先安装 OpenSSH client"

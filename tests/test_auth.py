@@ -1,4 +1,6 @@
-from app.auth import AutoAuthProvider
+import pytest
+
+from app.auth import AuthenticationCancelled, AutoAuthProvider, ManualAuthProvider, make_provider
 from app.models import Credential
 from app.totp import TotpReplayGuard
 
@@ -46,3 +48,16 @@ def test_separate_auto_auth_providers_do_not_reuse_totp_window():
     assert preview.session.last_used_counter == 3
     assert sync.session.last_used_counter == 4
     assert sleeps
+
+
+@pytest.mark.parametrize("answer", [None, ""])
+def test_manual_auth_cancels_for_missing_or_empty_password(answer):
+    provider = ManualAuthProvider(lambda _prompt: answer)
+
+    with pytest.raises(AuthenticationCancelled):
+        provider("Password:")
+
+
+def test_auto_auth_requires_a_selected_credential():
+    with pytest.raises(ValueError, match="未找到所选凭据"):
+        make_provider("auto", None, lambda _prompt: "unused")

@@ -435,14 +435,16 @@ class CredentialsDialog(QDialog):
             credential.validate()
             if not credential.totp_secret:
                 raise ValueError("TOTP Secret 不能为空")
+            candidate = dict(self.credentials)
             if self._editing_name and self._editing_name != credential.name:
-                self.credentials.pop(self._editing_name, None)
-            self.credentials[credential.name] = credential
+                candidate.pop(self._editing_name, None)
+            candidate[credential.name] = credential
+            self.store.save(candidate)
+            self.credentials = candidate
             self._editing_name = credential.name
-            self.store.save(self.credentials)
             self._refresh_list(credential.name)
             self.credentials_changed.emit()
-        except (ValueError, RuntimeError) as exc:
+        except (OSError, ValueError, RuntimeError) as exc:
             QMessageBox.warning(self, "无法保存凭据", str(exc))
 
     def _delete(self) -> None:
@@ -451,8 +453,14 @@ class CredentialsDialog(QDialog):
             return
         if QMessageBox.question(self, "删除凭据", f"确定删除凭据“{item.text()}”？") != QMessageBox.Yes:
             return
-        self.credentials.pop(item.text(), None)
-        self.store.save(self.credentials)
+        candidate = dict(self.credentials)
+        candidate.pop(item.text(), None)
+        try:
+            self.store.save(candidate)
+        except (OSError, ValueError, RuntimeError) as exc:
+            QMessageBox.warning(self, "无法删除凭据", str(exc))
+            return
+        self.credentials = candidate
         self._refresh_list()
         self.credentials_changed.emit()
 

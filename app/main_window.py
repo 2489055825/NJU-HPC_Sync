@@ -996,7 +996,10 @@ class MainWindow(QMainWindow):
     def _save_log(self) -> None:
         path, _ = QFileDialog.getSaveFileName(self, "保存日志", str(Path.home() / "nju-hpc-sync.log"), "Log files (*.log);;All files (*)")
         if path:
-            Path(path).write_text(self.log.toPlainText(), encoding="utf-8")
+            try:
+                Path(path).write_text(self.log.toPlainText(), encoding="utf-8")
+            except OSError as exc:
+                QMessageBox.warning(self, "无法保存日志", f"无法写入 {path}：{exc}")
 
     def _open_credentials(self) -> None:
         try:

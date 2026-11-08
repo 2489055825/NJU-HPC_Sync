@@ -1,10 +1,11 @@
 import os
 import time
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QDialog, QFormLayout, QGroupBox, QProgressBar
+from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QFormLayout, QGroupBox, QMessageBox, QProgressBar
 from PySide6.QtWidgets import QSizePolicy
 
 from app.credential_store import CredentialStore
@@ -65,6 +66,28 @@ def test_log_append_keeps_view_at_bottom(tmp_path):
     app.processEvents()
 
 
+def test_save_log_failure_shows_warning_and_preserves_log(tmp_path, monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(Database(tmp_path / "app.sqlite3"), CredentialStore(tmp_path / "credentials.json"))
+    window.log.setPlainText("safe log contents")
+    warnings = []
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(tmp_path / "export.log"), ""))
+
+    def fail_write(_path, _text, **_kwargs):
+        raise OSError("read-only filesystem")
+
+    monkeypatch.setattr(Path, "write_text", fail_write)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args: warnings.append(args[-1]))
+    try:
+        window._save_log()
+
+        assert warnings and "read-only filesystem" in warnings[0]
+        assert window.log.toPlainText() == "safe log contents"
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_main_window_has_no_progress_bar(tmp_path):
     app = QApplication.instance() or QApplication([])
     window = MainWindow(Database(tmp_path / "app.sqlite3"), CredentialStore(tmp_path / "credentials.json"))
@@ -84,6 +107,25 @@ def test_management_menu_exposes_host_manager(tmp_path):
     assert "Host 管理" in [action.text() for action in management_menu.actions()]
     window.close()
     app.processEvents()
+
+
+def test_delete_selected_profile_removes_it_from_database_and_list(tmp_path, monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    database = Database(tmp_path / "app.sqlite3")
+    database.save_profile(Profile("profile-a", "/tmp/a", "host", "/remote/a"))
+    database.save_profile(Profile("profile-b", "/tmp/b", "host", "/remote/b"))
+    window = MainWindow(database, CredentialStore(tmp_path / "credentials.json"))
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.Yes)
+    try:
+        window.profile_list.setCurrentRow(0)
+        window._delete_profile()
+
+        assert [profile.name for profile in database.list_profiles()] == ["profile-b"]
+        assert window.profile_list.count() == 1
+        assert window.profile_list.item(0).text() == "profile-b"
+    finally:
+        window.close()
+        app.processEvents()
 
 
 def test_host_manager_save_refreshes_host_selector(tmp_path, monkeypatch):

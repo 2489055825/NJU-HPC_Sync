@@ -71,18 +71,25 @@ def test_save_log_failure_shows_warning_and_preserves_log(tmp_path, monkeypatch)
     window = MainWindow(Database(tmp_path / "app.sqlite3"), CredentialStore(tmp_path / "credentials.json"))
     window.log.setPlainText("safe log contents")
     warnings = []
-    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(tmp_path / "export.log"), ""))
+    export_path = tmp_path / "export.log"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(export_path), ""))
 
     def fail_write(_path, _text, **_kwargs):
         raise OSError("read-only filesystem")
 
-    monkeypatch.setattr(Path, "write_text", fail_write)
     monkeypatch.setattr(QMessageBox, "warning", lambda *args: warnings.append(args[-1]))
     try:
-        window._save_log()
+        with monkeypatch.context() as failure:
+            failure.setattr(Path, "write_text", fail_write)
+            window._save_log()
 
         assert warnings and "read-only filesystem" in warnings[0]
         assert window.log.toPlainText() == "safe log contents"
+
+        window._save_log()
+
+        assert export_path.read_text(encoding="utf-8") == "safe log contents"
+        assert len(warnings) == 1
     finally:
         window.close()
         app.processEvents()

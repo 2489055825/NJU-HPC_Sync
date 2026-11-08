@@ -62,8 +62,8 @@ class CredentialStore:
                 handle.write("\n")
                 handle.flush()
                 os.fsync(handle.fileno())
+            # The temporary file is already private; replacement commits the save.
             os.replace(temporary, self.path)
-            os.chmod(self.path, 0o600)
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)

@@ -179,3 +179,99 @@ def test_missing_config_provides_location_and_can_be_refreshed(application, conf
         assert selector.message.isHidden()
     finally:
         selector.close()
+
+
+def test_new_profile_persists_form_and_selects_saved_task(window, tmp_path, monkeypatch):
+    local = tmp_path / "local data"
+
+    def accept_profile(dialog):
+        dialog.name.setText("new task")
+        dialog.local.setText(str(local))
+        dialog.host_selector.set_host("beta")
+        dialog.remote.setText("/sample/project")
+        dialog.direction.setCurrentIndex(dialog.direction.findData("download"))
+        dialog.mode.setCurrentIndex(dialog.mode.findData("mirror"))
+        dialog._validate_and_accept()
+        return dialog.result()
+
+    monkeypatch.setattr(ProfileDialog, "exec", accept_profile)
+
+    window._new_profile()
+    QApplication.processEvents()
+
+    profiles = window.db.list_profiles()
+    assert len(profiles) == 1
+    saved = profiles[0]
+    assert saved.name == "new task"
+    assert saved.local_path == str(local) + "/"
+    assert saved.remote_host == "beta"
+    assert saved.remote_path == "/sample/project/"
+    assert saved.default_direction == "download"
+    assert saved.default_mode == "mirror"
+    assert window.profile_list.currentItem().data(256) == saved.id
+    assert window.local.text() == str(local) + "/"
+    assert window.remote.text() == "/sample/project/"
+    assert window.host_selector.selected_host() == "beta"
+    assert window.download.isChecked()
+    assert window.mirror.isChecked()
+
+
+def test_edit_profile_updates_record_and_keeps_selection(window, tmp_path, monkeypatch):
+    original = window.db.save_profile(Profile("original", str(tmp_path), "alpha", "/sample/original"))
+    other = window.db.save_profile(Profile("other", str(tmp_path), "alpha", "/sample/other"))
+    window._load_profiles(original.id)
+    QApplication.processEvents()
+
+    def accept_edit(dialog):
+        dialog.name.setText("renamed")
+        dialog.host_selector.set_host("beta")
+        dialog.remote.setText("/sample/edited")
+        dialog._validate_and_accept()
+        return dialog.result()
+
+    monkeypatch.setattr(ProfileDialog, "exec", accept_edit)
+
+    window._edit_profile()
+    QApplication.processEvents()
+
+    saved = window.db.get_profile(original.id)
+    assert saved.name == "renamed"
+    assert saved.remote_host == "beta"
+    assert saved.remote_path == "/sample/edited/"
+    assert len(window.db.list_profiles()) == 2
+    assert window.db.get_profile(other.id) == other
+    assert window.profile_list.currentItem().data(256) == original.id
+    assert window.profile_list.currentItem().text() == "renamed"
+    assert window.remote.text() == "/sample/edited/"
+    assert window.host_selector.selected_host() == "beta"
+
+
+@pytest.mark.parametrize("action", ["_new_profile", "_edit_profile"])
+def test_duplicate_profile_warns_and_preserves_saved_tasks(window, tmp_path, monkeypatch, action):
+    original = window.db.save_profile(Profile("original", str(tmp_path), "alpha", "/sample/original"))
+    window.db.save_profile(Profile("existing", str(tmp_path), "beta", "/sample/existing"))
+    window._load_profiles(original.id)
+    QApplication.processEvents()
+    before = window.db.list_profiles()
+    warnings = []
+
+    def accept_duplicate(dialog):
+        dialog.name.setText("existing")
+        dialog.local.setText(str(tmp_path))
+        dialog.host_selector.set_host("beta")
+        dialog.remote.setText("/sample/attempted-change")
+        dialog._validate_and_accept()
+        return dialog.result()
+
+    monkeypatch.setattr(ProfileDialog, "exec", accept_duplicate)
+    monkeypatch.setattr(QMessageBox, "warning", lambda _parent, title, _text: warnings.append(title))
+
+    getattr(window, action)()
+    QApplication.processEvents()
+
+    assert warnings == ["无法保存 Profile"]
+    assert window.db.list_profiles() == before
+    assert window.profile_list.count() == 2
+    assert window.profile_list.currentItem().data(256) == original.id
+    assert window.profile_list.currentItem().text() == "original"
+    assert window.remote.text() == "/sample/original"

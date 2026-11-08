@@ -30,29 +30,30 @@
 
 **Files:**
 - Modify: `app/dialogs.py:432-457`
+- Modify after review: `app/credential_store.py:65-66`
 - Test: `tests/test_recovery.py`
 
 **Interfaces:**
 - Consumes: `CredentialStore.save(credentials)` and the existing `CredentialsDialog` fields.
 - Produces: `CredentialsDialog._save()` and `_delete()` update `self.credentials`, selection state, and `credentials_changed` only after a successful store save; caught write failures use the existing `QMessageBox.warning` path.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
   Add tests that load a valid credential, monkeypatch `store.save` to raise `OSError`, invoke `_save()` or `_delete()`, and assert that the warning is shown, the original JSON remains unchanged, the dialog mapping remains unchanged, and no change signal is emitted.
 
-- [ ] **Step 2: Run the focused tests to verify they fail**
+- [x] **Step 2: Run the focused tests to verify they fail**
 
-  Run: `conda run -n hpc-sync pytest -q tests/test_recovery.py -k 'credential.*failure or credential.*delete'`
+  Run: `conda run -n hpc-sync pytest -q tests/test_recovery.py -k 'credential_save_failure or credential_delete_failure'`
 
   Expected: the tests fail because the current dialog mutates its mapping before `store.save()` and does not catch `OSError`.
 
-- [ ] **Step 3: Implement staged save/delete in `app/dialogs.py`**
+- [x] **Step 3: Implement staged save/delete in `app/dialogs.py`**
 
   Build a copied candidate mapping, apply the edit or deletion to that copy, call `store.save(candidate)`, then assign the candidate and refresh/emit only after success. Catch `OSError` together with the existing validation/runtime errors and preserve the current fields on failure.
 
-- [ ] **Step 4: Run the focused tests to verify they pass**
+- [x] **Step 4: Run the focused tests to verify they pass**
 
-  Run: `conda run -n hpc-sync pytest -q tests/test_recovery.py -k 'credential.*failure or credential.*delete'`
+  Run: `conda run -n hpc-sync pytest -q tests/test_recovery.py -k 'credential_save_failure or credential_delete_failure'`
 
   Expected: all new tests pass.
 
@@ -66,21 +67,21 @@
 - Consumes: `QFileDialog.getSaveFileName`, `Path.write_text`, and the main window warning-dialog convention.
 - Produces: `_save_log()` catches `OSError`, calls `QMessageBox.warning`, and leaves the log and window available for another attempt.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
   Stub the save-file dialog to return a path, make `Path.write_text` raise `OSError`, call `_save_log()`, and assert that the warning contains the write error and the log contents remain available.
 
-- [ ] **Step 2: Run the focused test to verify it fails**
+- [x] **Step 2: Run the focused test to verify it fails**
 
   Run: `conda run -n hpc-sync pytest -q tests/test_main_window.py -k 'save_log_failure'`
 
   Expected: the current implementation raises `OSError` instead of showing a warning.
 
-- [ ] **Step 3: Implement the minimal `OSError` handler**
+- [x] **Step 3: Implement the minimal `OSError` handler**
 
   Wrap only `Path(path).write_text(...)` in `try/except OSError`; keep the existing success behavior and use the existing window warning style.
 
-- [ ] **Step 4: Run the focused test to verify it passes**
+- [x] **Step 4: Run the focused test to verify it passes**
 
   Run: `conda run -n hpc-sync pytest -q tests/test_main_window.py -k 'save_log_failure'`
 
@@ -99,11 +100,11 @@
 - Consumes: existing `ManualAuthProvider`, `make_provider`, `preflight`, `Database`, `friendly_exit_message`, and Profile UI behavior.
 - Produces: regression tests documenting current error messages and state transitions; no production interface changes.
 
-- [ ] **Step 1: Add focused tests**
+- [x] **Step 1: Add focused tests**
 
   Cover manual auth cancellation/empty input, missing rsync/SSH preflight, invalid retention and profile update/delete/missing lookups, exit codes 0/23/24/255/default, and Profile deletion/duplicate-name handling using isolated fixtures.
 
-- [ ] **Step 2: Run the focused boundary tests**
+- [x] **Step 2: Run the focused boundary tests**
 
   Run: `conda run -n hpc-sync pytest -q tests/test_auth.py tests/test_commands.py tests/test_database.py tests/test_runner.py tests/test_host_selector.py tests/test_main_window.py`
 
@@ -114,21 +115,35 @@
 **Files:**
 - Verify: all modified source and test files
 
-- [ ] **Step 1: Run the complete test suite**
+- [x] **Step 1: Run the complete test suite**
 
   Run: `conda run -n hpc-sync pytest -q`
 
   Expected: original 121 tests plus the new tests pass.
 
-- [ ] **Step 2: Run strict warnings and compile checks**
+- [x] **Step 2: Run strict warnings and compile checks**
 
   Run: `conda run -n hpc-sync pytest -q -W error` and `conda run -n hpc-sync python -m compileall -q app main.py`
 
   Expected: both exit with status 0.
 
-- [ ] **Step 3: Check the diff and isolated startup**
+- [x] **Step 3: Check the diff and isolated startup**
 
   Run: `git diff --check` and an offscreen startup/close smoke test with a temporary HOME and database.
 
   Expected: no whitespace errors, no credentials outside temporary paths, and the main window shows and closes cleanly.
+
+## Verification record
+
+The initial implementation added 17 cases to the original 121: the credential save/delete tests and log-export test first failed on unhandled `OSError`, then passed after the UI changes. Full suite and strict-warning runs both passed with 138 cases.
+
+An independent read-only review found two important gaps. First, `CredentialStore.save()` could raise from a redundant destination `chmod` after `os.replace()` had already committed. Two regression cases reproduced the disk/dialog mismatch for save and delete. The destination inherits mode `600` from the temporary file, so removing the late `chmod` makes replacement the commit point without weakening permissions. Both regression cases then passed. Save/delete failure tests now inject failures into the real store's `fsync` and `replace` operations, verify original bytes and temporary-file cleanup, and retry successfully. Log-export coverage also verifies a successful retry.
+
+Second, Profile creation/editing and duplicate-name handling lacked main-window coverage. Four cases now exercise the real dialog validation, database persistence, selection refresh, and duplicate-name warning paths. They characterize existing behavior; no Profile implementation change was needed.
+
+Final validation: `conda run -n hpc-sync pytest -q -W error` reported **146 passed in 9.32s**. The focused credential/Profile/window tests reported **52 passed**. `compileall` and `git diff --check` passed. An offscreen QApplication using a temporary home/database showed the main window, closed it through the event loop, and exited with status 0. No real HPC connection or user credential was used.
+
+Execution adjustments: missing task bookkeeping scripts were replaced with the available task-brief script and ledger; the invalid regex-style pytest `-k` expression was corrected above. Work stays in the confirmed local workspace, with local commits only. The strongest-model reviewer hit a usage limit; the completed independent review used the available GPT-6.1 Sol reviewer. The review's two important findings were resolved in one fix pass; there were no deferred minor findings.
+
+Review boundaries: SSH/HPC compatibility remains outside this change. Export failures preserve the displayed log for retry; atomic replacement of an existing exported log was not part of the approved design. An unchanged deferred-scroll callback observed only under synthetic back-to-back operations without Qt event processing was not changed; retry tests process events between user actions. Native desktop event ordering and real HPC transfers remain unverified.
 

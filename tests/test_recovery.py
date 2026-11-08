@@ -86,7 +86,8 @@ def test_failed_save_on_close_retains_editor_draft(home, monkeypatch):
         dialog.done(0)
 
 
-def test_credential_save_failure_preserves_disk_and_editor_state(home, monkeypatch):
+@pytest.mark.parametrize("failure_point", ["fsync", "replace"])
+def test_credential_save_failure_preserves_disk_and_editor_state(home, monkeypatch, failure_point):
     from app.dialogs import CredentialsDialog
     from app.models import Credential
 
@@ -99,22 +100,42 @@ def test_credential_save_failure_preserves_disk_and_editor_state(home, monkeypat
     warnings = []
     dialog.credentials_changed.connect(lambda: changed.append(True))
     dialog.name.setText("renamed")
-    monkeypatch.setattr(store, "save", lambda _credentials: (_ for _ in ()).throw(OSError("disk full")))
+    dialog.static_password.setText("edited-static")
+    original_credentials = store.load()
     monkeypatch.setattr(QMessageBox, "warning", lambda *args: warnings.append(args[-1]))
+
+    def fail_write(*_args):
+        raise OSError("disk full")
+
     try:
-        dialog._save()
+        with monkeypatch.context() as failure:
+            failure.setattr(f"app.credential_store.os.{failure_point}", fail_write)
+            dialog._save()
 
         assert warnings and "disk full" in warnings[0]
         assert path.read_bytes() == original_bytes
-        assert list(dialog.credentials) == ["original"]
+        assert dialog.credentials == original_credentials
         assert dialog._editing_name == "original"
         assert dialog.name.text() == "renamed"
+        assert dialog.static_password.text() == "edited-static"
+        assert list(home.glob("credentials.*.tmp")) == []
         assert changed == []
+
+        dialog._save()
+        QApplication.processEvents()
+
+        assert store.load() == dialog.credentials
+        assert list(store.load()) == ["renamed"]
+        assert store.load()["renamed"].static_password == "edited-static"
+        assert dialog.list.currentItem().text() == "renamed"
+        assert dialog._editing_name == "renamed"
+        assert changed == [True]
     finally:
         dialog.done(0)
 
 
-def test_credential_delete_failure_preserves_disk_and_dialog_state(home, monkeypatch):
+@pytest.mark.parametrize("failure_point", ["fsync", "replace"])
+def test_credential_delete_failure_preserves_disk_and_dialog_state(home, monkeypatch, failure_point):
     from app.dialogs import CredentialsDialog
     from app.models import Credential
 
@@ -127,15 +148,70 @@ def test_credential_delete_failure_preserves_disk_and_dialog_state(home, monkeyp
     warnings = []
     dialog.credentials_changed.connect(lambda: changed.append(True))
     monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.Yes)
-    monkeypatch.setattr(store, "save", lambda _credentials: (_ for _ in ()).throw(OSError("read-only filesystem")))
     monkeypatch.setattr(QMessageBox, "warning", lambda *args: warnings.append(args[-1]))
+
+    def fail_write(*_args):
+        raise OSError("read-only filesystem")
+
     try:
-        dialog._delete()
+        with monkeypatch.context() as failure:
+            failure.setattr(f"app.credential_store.os.{failure_point}", fail_write)
+            dialog._delete()
 
         assert warnings and "read-only filesystem" in warnings[0]
         assert path.read_bytes() == original_bytes
         assert list(dialog.credentials) == ["original"]
         assert dialog.list.currentItem().text() == "original"
+        assert list(home.glob("credentials.*.tmp")) == []
         assert changed == []
+
+        dialog._delete()
+        QApplication.processEvents()
+
+        assert store.load() == dialog.credentials == {}
+        assert dialog.list.count() == 0
+        assert dialog.name.text() == ""
+        assert dialog.static_password.text() == ""
+        assert dialog.totp_secret.text() == ""
+        assert changed == [True]
+    finally:
+        dialog.done(0)
+
+
+@pytest.mark.parametrize("operation", ["save", "delete"])
+def test_credential_commit_keeps_disk_and_dialog_in_sync(home, monkeypatch, operation):
+    from app.dialogs import CredentialsDialog
+    from app.models import Credential
+
+    path = home / "credentials.json"
+    store = CredentialStore(path)
+    store.save({"original": Credential("original", "static", "JBSWY3DPEHPK3PXP")})
+    dialog = CredentialsDialog(store)
+    warnings = []
+    changed = []
+    dialog.credentials_changed.connect(lambda: changed.append(True))
+    original_chmod = os.chmod
+
+    def fail_destination_chmod(target, mode):
+        if target == path:
+            raise PermissionError("synthetic chmod failure after replacement")
+        original_chmod(target, mode)
+
+    monkeypatch.setattr("app.credential_store.os.chmod", fail_destination_chmod)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args: warnings.append(args[-1]))
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.Yes)
+    try:
+        if operation == "save":
+            dialog.name.setText("renamed")
+            dialog._save()
+            expected_names = ["renamed"]
+        else:
+            dialog._delete()
+            expected_names = []
+
+        assert warnings == []
+        assert list(store.load()) == list(dialog.credentials) == expected_names
+        assert os.stat(path).st_mode & 0o777 == 0o600
+        assert changed == [True]
     finally:
         dialog.done(0)

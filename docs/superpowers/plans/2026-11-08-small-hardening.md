@@ -147,3 +147,13 @@ Execution adjustments: missing task bookkeeping scripts were replaced with the a
 
 Review boundaries: SSH/HPC compatibility remains outside this change. Export failures preserve the displayed log for retry; atomic replacement of an existing exported log was not part of the approved design. An unchanged deferred-scroll callback observed only under synthetic back-to-back operations without Qt event processing was not changed; retry tests process events between user actions. Native desktop event ordering and real HPC transfers remain unverified.
 
+## Version 1.0.7 delivery validation
+
+The user subsequently authorized building a new deb, upgrading the local installation, pushing to GitHub and publishing a new Release. VERSION and the README installation example are now 1.0.7; the existing pytest-cov development dependency and coverage instructions are included in the release commit.
+
+Release validation: strict pytest with coverage reported **146 passed in 9.68s**, with **90% line coverage**. Compile and whitespace checks passed. The existing Ubuntu 22.04 amd64 build script produced `nju-hpc-sync_1.0.7_amd64.deb` (81,789,870 bytes), whose SHA-256 is `7d313e801e662f7d0f71ee1facb49ff0eee8d96988223cb5785afc7ba6491795`.
+
+Embedded bytecode for `app.credential_store`, `app.dialogs` and `app.main_window` matches the current source. Packaged README and launcher match the release inputs. Both the extracted package and installed launcher passed 5-second startup checks with clean and malformed temporary credentials, preserving the malformed file bytes.
+
+Local dpkg installation upgraded 1.0.6 to **1.0.7 install ok installed**. All **356** installed package files match the extracted deb; `dpkg --verify` is clean. The existing Docker smoke script passed on Ubuntu **24.04 and 26.04**. Tests did not connect to a real HPC or use real credentials. GitHub publication follows this validated local snapshot; remote commit/tag and Release asset verification are recorded in the delivery response.
+

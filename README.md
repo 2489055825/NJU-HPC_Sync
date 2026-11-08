@@ -25,7 +25,7 @@ rsync -avzP --stats --itemize-changes -- hpc-alias:/path/to/remote/project/ /pat
 适用于 **Ubuntu 22.04 及以上的 amd64 桌面系统**。从 [Releases](https://github.com/2489055825/NJU-HPC_Sync/releases/latest) 下载 `.deb` 安装包，在下载目录执行：
 
 ```bash
-sudo apt install ./nju-hpc-sync_1.0.6_amd64.deb
+sudo apt install ./nju-hpc-sync_1.0.7_amd64.deb
 nju-hpc-sync
 ```
 
@@ -115,5 +115,13 @@ conda env create -f environment.yml
 ```
 
 测试：`conda run -n hpc-sync pytest -q`。打包：先安装 `build-requirements.txt`，再运行 `scripts/build_deb.sh`（Ubuntu 22.04 amd64）。
+
+测试覆盖率（pytest-cov）：
+
+```bash
+conda run -n hpc-sync pytest -q --cov=app --cov-report=term-missing --cov-report=html
+```
+
+终端会显示覆盖率及未覆盖行；HTML 报告位于 `htmlcov/index.html`。无桌面环境时，在命令前加 `QT_QPA_PLATFORM=offscreen`。
 
 </details>

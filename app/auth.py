@@ -5,11 +5,21 @@ import threading
 from typing import Callable, Protocol
 
 from .models import Credential
-from .totp import TotpCancelled, TotpConfig, TotpReplayGuard, TotpSession
+from .totp import TotpCancelled, TotpConfig, TotpReplayGuard, TotpSession, generate_code
 
 
 class AuthenticationCancelled(Exception):
     """Raised when the user closes or cancels a password prompt."""
+
+
+def validate_automatic_credential(credential: Credential) -> None:
+    credential.validate()
+    if not credential.static_password or not credential.totp_secret:
+        raise ValueError("自动认证需要固定密码和 TOTP Secret")
+    # Validate Base32 and algorithm parameters without claiming a window or
+    # exposing a code. The real code is generated only at the SSH prompt.
+    generate_code(TotpConfig(credential.totp_secret, credential.totp_algorithm,
+                             credential.totp_period, credential.totp_digits), 0)
 
 
 class PasswordProvider(Protocol):

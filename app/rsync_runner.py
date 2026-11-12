@@ -13,6 +13,7 @@ import pexpect
 from .models import RunResult, RunStatus
 from .auth import AuthenticationCancelled
 from .paths import StreamingRedactor, redact_text
+from .runtime import process_identity, stop_session
 
 
 # OpenSSH commonly prints `user@host's password:` on one line, while
@@ -31,6 +32,19 @@ class RunnerCallbacks:
     on_status: Callable[[RunStatus], None] | None = None
     on_prompt: Callable[[str], str | None] | None = None
     on_host_key: Callable[[str], bool] | None = None
+    on_started: Callable[[int], None] | None = None
+
+
+class _LeaseSpawn(pexpect.spawn):
+    """Keep a transfer lease held even if its owning worker dies."""
+
+    def __init__(self, *args, lease_fd: int, **kwargs):
+        self._lease_fd = lease_fd
+        super().__init__(*args, **kwargs)
+
+    def _spawnpty(self, args, **kwargs):
+        from ptyprocess import PtyProcess
+        return PtyProcess.spawn(args, pass_fds=(self._lease_fd,), **kwargs)
 
 
 class RsyncRunner:
@@ -60,13 +74,16 @@ class RsyncRunner:
             except Exception:
                 pass
 
-    def run(self, command: list[str], callbacks: RunnerCallbacks | None = None, secrets: Iterable[str] = (), preflight: bool = True) -> RunResult:
+    def run(self, command: list[str], callbacks: RunnerCallbacks | None = None, secrets: Iterable[str] = (), preflight: bool = True, *, lease_fd: int | None = None, authentication_timeout: float | None = None) -> RunResult:
         callbacks = callbacks or RunnerCallbacks()
         self._secrets = [secret for secret in secrets if secret]
         started = time.monotonic()
         start_time = datetime.now(timezone.utc).isoformat(timespec="seconds")
         output_parts: list[str] = []
         redactor = StreamingRedactor(self._secrets)
+        child_identity: dict = {}
+        auth_started = started
+        status, code = RunStatus.FAILED, None
 
         def emit_status(status: RunStatus) -> None:
             if callbacks.on_status and (not self._cancel_event.is_set() or status is RunStatus.CANCELLED):
@@ -92,10 +109,18 @@ class RsyncRunner:
         emit_status(RunStatus.CONNECTING)
         try:
             check_cancelled()
-            child = pexpect.spawn(command[0], command[1:], encoding="utf-8", codec_errors="replace", timeout=0.25)
+            options = dict(encoding="utf-8", codec_errors="replace", timeout=0.25)
+            if lease_fd is None:
+                child = pexpect.spawn(command[0], command[1:], **options)
+            else:
+                os.set_inheritable(lease_fd, True)
+                child = _LeaseSpawn(command[0], command[1:], lease_fd=lease_fd, **options)
+            child_identity = process_identity(child.pid)
             child.delaybeforesend = 0
             with self._lock:
                 self._child = child
+            if callbacks.on_started:
+                callbacks.on_started(child.pid)
             check_cancelled()
             emitted_buffer = ""
             while True:
@@ -103,6 +128,8 @@ class RsyncRunner:
                 index = child.expect([HOST_KEY_PATTERN, PROMPT_PATTERN, pexpect.EOF, pexpect.TIMEOUT])
                 before = child.before or ""
                 if before:
+                    if re_transfer_started(before):
+                        authentication_timeout = None
                     # pexpect keeps an unmatched PTY buffer across TIMEOUTs.
                     # Emit only the part that was not sent on the previous read.
                     if before.startswith(emitted_buffer):
@@ -131,6 +158,7 @@ class RsyncRunner:
                     check_cancelled()
                     self._secrets.append(password)
                     send_response(password)
+                    auth_started = time.monotonic()
                     del password
                     emit_status(RunStatus.TRANSFERRING)
                     continue
@@ -138,6 +166,8 @@ class RsyncRunner:
                     break
                 if not child.isalive():
                     break
+                if authentication_timeout is not None and time.monotonic() - auth_started > authentication_timeout:
+                    raise RuntimeError("SSH_AUTH_TIMEOUT: 未能完成非交互认证")
             child.close(force=False)
             code = child.exitstatus
             if code is None:
@@ -159,10 +189,14 @@ class RsyncRunner:
             emit_output(f"\n{type(exc).__name__}: {exc}\n")
             status, code = RunStatus.FAILED, None
         finally:
-            emit_output("", final=True)
-            safe_output = redact_text("".join(output_parts), self._secrets)
-            if self._child is not None and self._child.isalive():
-                self._child.close(force=True)
+            try:
+                emit_output("", final=True)
+                safe_output = redact_text("".join(output_parts), self._secrets)
+            finally:
+                if status is not RunStatus.SUCCESS or self._cancel_event.is_set():
+                    stop_session(child_identity)
+                if self._child is not None and self._child.isalive():
+                    self._child.close(force=True)
             if self._cancel_event.is_set():
                 status = RunStatus.CANCELLED
             emit_status(status)
@@ -170,6 +204,10 @@ class RsyncRunner:
             self._child = None
             self._secrets = []
         return RunResult(status, code, safe_output, start_time, end_time, time.monotonic() - started, list(command))
+
+
+def re_transfer_started(output: str) -> bool:
+    return any(value in output for value in ("sending incremental file list", "receiving incremental file list", "building file list"))
 
 
 def friendly_exit_message(exit_code: int | None) -> str:

@@ -41,7 +41,9 @@ from .models import Direction, HistoryRecord, Profile, RunResult, RunStatus, Syn
 from .paths import normalize_directory_path, normalize_local_path, redact_text
 from .rsync_command import build_command, preflight
 from .rsync_runner import RunnerCallbacks, RsyncRunner, friendly_exit_message
-from .totp import TotpReplayGuard
+from .totp import PersistentTotpReplayGuard, TotpReplayGuard
+from .runtime import TransferLease, process_identity
+from .sync_service import changes, itemized_change, stat_value, sync_counts
 
 
 class PromptBroker:
@@ -134,9 +136,11 @@ class SyncWorker(QObject):
     def run(self) -> None:
         provider = None
         secrets: list[str] = []
+        lease = None
         try:
             if self.cancel_event.is_set():
                 raise AuthenticationCancelled("任务已取消")
+            lease = TransferLease.acquire({"owner": "gui"})
             if self.auth_mode == "auto":
                 if self.credential is None:
                     raise ValueError("自动认证需要选择凭据")
@@ -150,13 +154,17 @@ class SyncWorker(QObject):
             callbacks = RunnerCallbacks(
                 on_output=self.output.emit, on_status=report_status, on_prompt=provider,
                 on_host_key=lambda prompt: self.host_key_broker.request(prompt) == "yes",
+                on_started=lambda pid: lease.set_owner({"owner": "gui", "child_process": process_identity(pid)}),
             )
-            result = self.runner.run(self.command, callbacks, secrets=secrets, preflight=False)
+            result = self.runner.run(self.command, callbacks, secrets=secrets, preflight=False, lease_fd=lease.fd)
         except AuthenticationCancelled:
             result = RunResult(RunStatus.CANCELLED, None, "", "", "", 0.0, self.command)
         except Exception as exc:
             self.output.emit(f"{type(exc).__name__}: {exc}\n")
             result = RunResult(RunStatus.FAILED, None, f"{type(exc).__name__}: {exc}\n", "", "", 0.0, self.command)
+        finally:
+            if lease is not None:
+                lease.close()
         self.finished.emit(result)
 
     def answer(self, value: str | None) -> None:
@@ -200,7 +208,7 @@ class MainWindow(QMainWindow):
         self._last_log_status = ""
         self._transfer_index = 0
         self._transfer_total: int | None = None
-        self._totp_replay_guard = TotpReplayGuard()
+        self._totp_replay_guard = PersistentTotpReplayGuard()
         self._build_ui()
         self._load_profiles()
         if self._credential_error:
@@ -757,20 +765,11 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _sync_counts(output: str) -> tuple[int | None, int | None]:
-        def stat(name: str) -> int | None:
-            match = re.search(rf"(?im)^\s*{re.escape(name)}:\s*([\d,]+)\b", output)
-            return int(match.group(1).replace(",", "")) if match else None
-
-        transferred = stat("Number of regular files transferred")
-        deleted = stat("Number of deleted files")
-        if deleted is None:
-            deleted = sum(1 for line in output.splitlines() if line.strip().lower().startswith("deleting "))
-        return transferred, deleted
+        return sync_counts(output)
 
     @staticmethod
     def _rsync_stat(output: str, name: str) -> int | None:
-        match = re.search(rf"(?im)^\s*{re.escape(name)}:\s*([\d,]+)", output)
-        return int(match.group(1).replace(",", "")) if match else None
+        return stat_value(output, name)
 
     @staticmethod
     def _total_entries(output: str) -> int | None:
@@ -786,25 +785,11 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _parse_itemized_change(line: str) -> tuple[str, str] | None:
-        line = line.rstrip()
-        if line.startswith("*deleting"):
-            name = line[len("*deleting"):].strip()
-            return ("delete", name) if name else None
-        if len(line) < 13 or line[11] != " ":
-            return None
-        code, name = line[:11], line[12:].strip()
-        if not name or code[0] not in "<>" or code[1] == "d":
-            return None
-        return ("add" if code[2] == "+" else "update", name)
+        return itemized_change(line)
 
     @classmethod
     def _changes(cls, output: str) -> list[tuple[str, str]]:
-        changes = []
-        for line in output.splitlines():
-            change = cls._parse_itemized_change(line)
-            if change:
-                changes.append(change)
-        return changes
+        return changes(output)
 
     @staticmethod
     def _format_bytes(value: int | None) -> str:

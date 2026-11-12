@@ -12,13 +12,19 @@ LOG_RETENTION_KEY = "log_retention_days"
 
 
 class Database:
-    def __init__(self, path: str | Path | None = None):
+    def __init__(self, path: str | Path | None = None, *, readonly: bool = False):
         self.path = Path(path or Path.home() / ".local" / "share" / "nju-hpc-sync" / "nju-hpc-sync.sqlite3").expanduser()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._connection = sqlite3.connect(self.path, check_same_thread=False)
+        if readonly:
+            if not self.path.is_file():
+                raise FileNotFoundError(self.path)
+            self._connection = sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True)
+        else:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._connection = sqlite3.connect(self.path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA foreign_keys = ON")
-        self._initialize()
+        if not readonly:
+            self._initialize()
 
     def _initialize(self) -> None:
         self._connection.executescript(

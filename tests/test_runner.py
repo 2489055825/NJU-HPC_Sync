@@ -40,3 +40,11 @@ def test_runner_does_not_repeat_output_across_timeouts():
 )
 def test_friendly_exit_message_covers_known_and_unknown_codes(exit_code, expected):
     assert friendly_exit_message(exit_code) == expected
+
+
+def test_headless_authentication_timeout_does_not_wait_forever():
+    script = "import time; print('unrecognized challenge:',flush=True); time.sleep(20)"
+    result = RsyncRunner().run([sys.executable, "-c", script], authentication_timeout=.1)
+    assert result.status is RunStatus.FAILED
+    assert "SSH_AUTH_TIMEOUT" in result.output
+    assert result.duration < 3

@@ -557,16 +557,17 @@ class UsageDialog(QDialog):
             "基本原理\n"
             "本软件不实现 SFTP；它只组装参数并调用系统 rsync，rsync 再使用 OpenSSH 和 ~/.ssh/config。\n\n"
             "上传（Local -> NJU-HPC）:\n"
-            "rsync -avzP --stats --itemize-changes -- /本地目录/ nju:/远程目录/\n\n"
+            "rsync -avzP --stats --itemize-changes --old-args -- /本地目录/ nju:/远程目录/\n\n"
             "下载（NJU-HPC -> Local）:\n"
-            "rsync -avzP --stats --itemize-changes -- nju:/远程目录/ /本地目录/\n\n"
+            "rsync -avzP --stats --itemize-changes --protect-args --rsync-path='CDPATH= cd -P /远程目录/ && exec rsync' -- nju:./ /本地目录/\n\n"
             "镜像预览（会检查待删除内容）:\n"
-            "rsync -avzP --stats --itemize-changes --delete --dry-run -- /本地目录/ nju:/远程目录/\n\n"
+            "rsync -avzP --stats --itemize-changes --old-args --delete --dry-run -- /本地目录/ nju:/远程目录/\n\n"
             "使用方法\n"
             "1. 管理 -> 凭据管理：自动 TOTP 可保存凭据；也可以选择手工输入完整密码。\n"
             "2. 填写本地目录和远程目录，从下拉列表选择远程 Host；列表读取 ~/.ssh/config 及 Include 文件。修改 SSH 配置后点击“刷新”，或通过“管理 -> Host 管理”编辑主配置文件。凭据只负责认证。\n"
             "3. 选择方向和模式，先点“预览”；镜像同步确认删除数量后再执行。\n"
-            "4. 目录会自动补齐尾部 /，表示同步目录内容。"
+            "4. 目录会自动补齐尾部 /，表示同步目录内容；路径按字面值处理，不用手工添加引号或转义。\n"
+            "本地 rsync 需 3.2.4 及以上；远端需 rsync 3.1 及以上和兼容 POSIX 的 shell。"
         )
         content = QPlainTextEdit()
         content.setReadOnly(True)

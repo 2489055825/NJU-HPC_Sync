@@ -6,10 +6,12 @@
 
 ```bash
 # 上传：本地 → HPC
-rsync -avzP --stats --itemize-changes -- /path/to/local/project/ hpc-alias:/path/to/remote/project/
+rsync -avzP --stats --itemize-changes --old-args -- /path/to/local/project/ hpc-alias:/path/to/remote/project/
 
 # 下载：HPC → 本地
-rsync -avzP --stats --itemize-changes -- hpc-alias:/path/to/remote/project/ /path/to/local/project/
+rsync -avzP --stats --itemize-changes --protect-args \
+  --rsync-path='CDPATH= cd -P /path/to/remote/project/ && exec rsync' \
+  -- hpc-alias:./ /path/to/local/project/
 ```
 
 | 界面操作 | 对应行为 |
@@ -20,12 +22,16 @@ rsync -avzP --stats --itemize-changes -- hpc-alias:/path/to/remote/project/ /pat
 
 程序同步的是**目录里的内容**，会自动补齐路径末尾的 `/`。
 
+远程目录按填写的字面值处理：`data[1]`、`data*` 等名称不会展开成其他目录。上传时程序对完整远程路径做 shell 引用；下载时先进入经过完整引用的源目录，再通过受保护参数通道同步 `./`，避免 rsync 展开原始目录名。源目录不存在时直接失败，不会改用相似名称的目录。请直接填写目录名称，无需额外添加引号或反斜杠。上面的等价命令使用不含特殊字符的示例路径。
+
+本地 rsync 需要 **3.2.4 或更新版本**；远端使用 **3.1 或更新版本的 rsync** 和兼容 POSIX 的登录 shell。目前真实传输回归使用 rsync 3.2.7。远端拒绝受保护参数时会报错，不自动退回可能展开目录的方式。
+
 ## 安装和启动
 
 适用于 **Ubuntu 22.04 及以上的 amd64 桌面系统**。从 [Releases](https://github.com/2489055825/NJU-HPC_Sync/releases/latest) 下载 `.deb` 安装包，在下载目录执行：
 
 ```bash
-sudo apt install ./nju-hpc-sync_1.0.7_amd64.deb
+sudo apt install ./nju-hpc-sync_1.1.0_amd64.deb
 nju-hpc-sync
 ```
 
@@ -102,6 +108,67 @@ Host hpc-alias
 | SSH 连接或认证失败 | 可先在终端用 `ssh hpc-alias` 核对地址、账号、端口、网络及密码格式 |
 
 保存的密码和 TOTP Secret 位于本机 `~/.config/nju-hpc-sync/credentials.json`，不要分享该文件。Profile 和历史位于 `~/.local/share/nju-hpc-sync/nju-hpc-sync.sqlite3`。
+
+## 命令行与 Agent 调用
+
+源码版已提供无需 GUI 的 CLI。使用同一套已有 SSH Host、Profile 和 TOTP 凭据，不需要输入密码或验证码；不提供修改配置的命令。无参数的 `./run.sh` 仍打开 GUI。
+
+```bash
+# 查询已有配置；凭据查询只显示名称和参数完整性
+./run.sh profiles list --json
+./run.sh hosts list --json
+./run.sh credentials list --json
+./run.sh doctor --json
+
+# 预览变化，然后执行普通增量同步
+./run.sh preview --profile my-project --json
+./run.sh sync --profile my-project --json
+
+# 明确允许镜像删除；授权由调用方决定，软件不弹确认窗口
+./run.sh preview --profile my-project --mirror --json
+./run.sh sync --profile my-project --mirror --json
+
+# 临时指定目录和方向，不创建或修改 Profile
+./run.sh sync --local /path/to/local/project --host hpc-alias \
+  --remote /path/to/remote/project --direction download --credential my-account --json
+```
+
+CLI 默认使用普通同步；即使 Profile 中保存的默认模式为镜像，也必须显式传入 `--mirror` 才会删除目标端多余文件。使用 Profile 时可通过 `--direction upload|download` 和 `--credential NAME` 覆盖本次方向和凭据。临时任务必须提供完整目录、Host 和方向，不能与 `--profile` 混用。凭据中必须已有固定密码及 TOTP Secret；命令行不接受密码或密钥参数。
+
+**实际传输由独立后台进程接管。** 默认命令等待最终结果；关闭终端、按 Ctrl+C 或等待超时只会结束等待，传输继续。软件无需常驻服务，任务完成后后台进程退出。也可以选择提交后立即返回：
+
+```bash
+./run.sh sync --profile my-project --detach --json
+./run.sh sync --profile my-project --wait-timeout 120 --json
+
+# TASK_ID 使用提交时返回的任务编号
+./run.sh status TASK_ID --json
+./run.sh wait TASK_ID --timeout 120 --json
+./run.sh logs TASK_ID --tail 200 --json
+./run.sh cancel TASK_ID --json
+./run.sh history list --limit 20 --json
+./run.sh history show 42 --json
+```
+
+省略任务编号时，`status`、`wait`、`logs` 选择当前 CLI 任务，否则选择最近任务；`cancel` 只选择当前 CLI 任务。取消请求绑定选定的任务编号，重复取消不会影响其他任务。取消命令最多等待 10 秒；返回 `state=cancelling, terminal=false` 表示仍在停止，可以继续查询。
+
+提交客户端在后台进程初始化期间退出，任务仍保持活动状态。此时的取消请求也会保存；后台进程继续初始化后，会在启动 rsync 前处理请求，最终返回 `state=cancelled`、`terminal=true` 和退出码 7。
+
+同一用户的新版 GUI 和 CLI 一次只执行一个预览或同步任务。已有任务时，新提交返回 `BUSY` 和占用者信息，不排队。CLI 不控制 GUI 任务。遇到陌生主机指纹需要确认时，先人工核对并完成 SSH 信任配置，再重试；软件不会自动接受主机指纹。
+
+`--json` 让 stdout 只返回一个 JSON 结果对象，进度和任务编号输出到 stderr，便于 agent 自动读取。最终任务字段包括 `task_id`、`state`、`terminal`、`transfer_success`、`rsync_exit_code`、`summary`、`history_saved` 和 `error`。`summary` 提供传输文件数、新增/更新/删除条目总数和字节数；变更样例最多 100 条，总数在截断前计算。`--detach` 的 `accepted=true` 只表示后台已接管，`terminal=false` 时仍需查询或等待最终结果；未知统计为 `null`。`status` 成功读取失败任务时退出码仍为 0，实际任务成败应读取 `state`；`wait` 返回任务对应的退出码。
+
+| 退出码 | 含义 |
+| --- | --- |
+| 0 | 操作成功；等待同步时代表任务成功，脱离提交时代表接管成功 |
+| 2 / 3 / 4 | 参数或配置错误 / 当前忙碌 / 本地运行条件或访问错误 |
+| 5 / 6 / 7 / 8 | SSH 信任或认证失败 / rsync 失败 / 任务已取消 / 执行中断或需要恢复 |
+| 124 | 等待超时，后台任务继续 |
+| 130 / 143 | 等待被中断或终止，后台任务继续 |
+
+任务记录及脱敏日志保存在 `~/.local/share/nju-hpc-sync/tasks/`，沿用日志保留天数；活动任务不会被清理。执行进程异常退出时，结果可能不确定；存在残留传输进程时返回 `RECOVERY_REQUIRED` 并阻止新同步。操作系统重启后不会自动重跑任务，也不会自动重试失败的镜像。普通终端关闭不会影响任务，但系统关机、注销时强制清理所有用户进程等操作仍可能中断传输。
+
+以上示例使用源码启动器。安装 1.1.0 或更新版本后，可将 `./run.sh` 换成 `nju-hpc-sync`；每个命令都有 `--help`。旧版 1.0.7 安装包不包含 CLI。
 
 <details>
 <summary>从源码运行与开发</summary>

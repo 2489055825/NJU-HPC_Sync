@@ -1,7 +1,10 @@
 import secrets
+import signal
 import sys
 import threading
 import time
+
+import pytest
 
 from app.models import RunStatus
 from app.rsync_runner import RsyncRunner, RunnerCallbacks
@@ -91,3 +94,19 @@ def test_cancelled_prompt_broker_never_opens_prompt():
 
     broker = PromptBroker(Prompt(), event)
     assert broker.request("Password:") is None
+
+
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT])
+def test_worker_signal_handler_only_publishes_flag_while_runner_lock_held(signum):
+    from app.worker import _install_signal_handlers
+
+    runner = RsyncRunner()
+    previous = _install_signal_handlers(runner)
+    try:
+        with runner._lock:
+            handler = signal.getsignal(signum)
+            handler(signum, None)
+            assert runner._signal_cancelled
+    finally:
+        for signum, old_handler in previous.items():
+            signal.signal(signum, old_handler)

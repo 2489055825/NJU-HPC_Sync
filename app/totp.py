@@ -1,18 +1,13 @@
 from __future__ import annotations
 
 import base64
-import fcntl
 import hashlib
 import hmac
-import os
 import struct
 import threading
 import time
 from dataclasses import dataclass
 from typing import Callable
-from pathlib import Path
-
-from .runtime import atomic_json, data_root, private_directory, read_json
 
 try:
     import pyotp
@@ -73,7 +68,8 @@ class TotpReplayGuard:
     def claim(self, config: TotpConfig, counter: int) -> bool:
         key = _window_identity(config)
         with self._lock:
-            if self._last_used_counters.get(key) == counter:
+            previous = self._last_used_counters.get(key)
+            if previous is not None and previous >= counter:
                 return False
             self._last_used_counters[key] = counter
             return True
@@ -87,32 +83,6 @@ def _window_identity(config: TotpConfig) -> tuple[bytes, str, int, int]:
 
 class TotpCancelled(Exception):
     """Raised when a pending TOTP authentication is cancelled."""
-
-
-class PersistentTotpReplayGuard:
-    """Claim windows atomically across CLI workers and GUI processes."""
-
-    def __init__(self, path: Path | None = None):
-        self.path = path or data_root() / "totp-windows.json"
-
-    def claim(self, config: TotpConfig, counter: int) -> bool:
-        secret, algorithm, period, digits = _window_identity(config)
-        key = hashlib.sha256(secret + f"\0{algorithm}:{period}:{digits}".encode()).hexdigest()
-        private_directory(self.path.parent)
-        fd = os.open(self.path.with_suffix(".lock"), os.O_CREAT | os.O_RDWR, 0o600)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            claims = read_json(self.path) if self.path.exists() else {}
-            previous = claims.get(key, -1)
-            if not isinstance(previous, int):
-                raise ValueError("验证码时间窗口记录无效")
-            if previous >= counter:
-                return False
-            claims[key] = counter
-            atomic_json(self.path, claims)
-            return True
-        finally:
-            os.close(fd)
 
 
 class TotpSession:

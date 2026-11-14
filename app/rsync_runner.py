@@ -54,6 +54,10 @@ class RsyncRunner:
         self._child: pexpect.spawn | None = None
         self._lock = threading.Lock()
         self._cancel_event = cancel_event if cancel_event is not None else threading.Event()
+        # Signal handlers may interrupt this thread while it owns _lock or an
+        # Event condition lock. They set this plain flag only; normal runner
+        # control flow converts it into the full, lock-taking cancellation.
+        self._signal_cancelled = False
         self._secrets: list[str] = []
 
     @property
@@ -74,6 +78,13 @@ class RsyncRunner:
             except Exception:
                 pass
 
+    def request_signal_cancel(self) -> None:
+        """Publish a signal cancellation without acquiring any Python lock."""
+        self._signal_cancelled = True
+
+    def _cancel_requested(self) -> bool:
+        return self._signal_cancelled or self._cancel_event.is_set()
+
     def run(self, command: list[str], callbacks: RunnerCallbacks | None = None, secrets: Iterable[str] = (), preflight: bool = True, *, lease_fd: int | None = None, authentication_timeout: float | None = None) -> RunResult:
         callbacks = callbacks or RunnerCallbacks()
         self._secrets = [secret for secret in secrets if secret]
@@ -86,16 +97,17 @@ class RsyncRunner:
         status, code = RunStatus.FAILED, None
 
         def emit_status(status: RunStatus) -> None:
-            if callbacks.on_status and (not self._cancel_event.is_set() or status is RunStatus.CANCELLED):
+            if callbacks.on_status and (not self._cancel_requested() or status is RunStatus.CANCELLED):
                 callbacks.on_status(status)
 
         def check_cancelled() -> None:
-            if self._cancel_event.is_set():
+            if self._cancel_requested():
                 raise RunnerCancelled()
 
         def send_response(value: str) -> None:
             # Keep pexpect's usual echo-disable grace period cancellable.
-            if self._cancel_event.wait(0.05):
+            self._cancel_event.wait(0.05)
+            if self._cancel_requested():
                 raise RunnerCancelled()
             child.sendline(value)
 
@@ -172,7 +184,7 @@ class RsyncRunner:
             code = child.exitstatus
             if code is None:
                 code = child.signalstatus and 128 + child.signalstatus or 0
-            status = RunStatus.CANCELLED if self._cancel_event.is_set() else (RunStatus.SUCCESS if code == 0 else RunStatus.FAILED)
+            status = RunStatus.CANCELLED if self._cancel_requested() else (RunStatus.SUCCESS if code == 0 else RunStatus.FAILED)
         except (RunnerCancelled, AuthenticationCancelled):
             self.cancel()
             if self._child is not None:
@@ -193,11 +205,11 @@ class RsyncRunner:
                 emit_output("", final=True)
                 safe_output = redact_text("".join(output_parts), self._secrets)
             finally:
-                if status is not RunStatus.SUCCESS or self._cancel_event.is_set():
+                if status is not RunStatus.SUCCESS or self._cancel_requested():
                     stop_session(child_identity)
                 if self._child is not None and self._child.isalive():
                     self._child.close(force=True)
-            if self._cancel_event.is_set():
+            if self._cancel_requested():
                 status = RunStatus.CANCELLED
             emit_status(status)
             end_time = datetime.now(timezone.utc).isoformat(timespec="seconds")

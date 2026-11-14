@@ -1,5 +1,7 @@
 import json
 import os
+import signal
+import threading
 from dataclasses import asdict
 
 import pytest
@@ -54,6 +56,8 @@ def test_worker_uses_saved_totp_and_redacts_echoed_password(tmp_path, monkeypatc
     assert "synthetic-fixed" not in log and "JBSWY3DPEHPK3PXP" not in log
     assert "TRACE:[REDACTED]" in log
     assert "synthetic-fixed" not in json.dumps(record)
+    runtime = tmp_path / ".local/share/nju-hpc-sync"
+    assert not list(runtime.glob("totp-windows.*"))
 
 
 def test_unknown_host_key_fails_without_interaction(tmp_path, monkeypatch):
@@ -81,3 +85,36 @@ def test_nonzero_rsync_is_not_reported_as_success(tmp_path, monkeypatch):
     assert record["state"] == "failed"
     assert record["rsync_exit_code"] == 23
     assert record["cli_exit_code"] == 6
+
+
+def test_worker_defers_sigterm_cleanup_until_runner_control_flow(tmp_path, monkeypatch):
+    from app.models import SyncRequest
+    from app.rsync_runner import RsyncRunner
+    from app.runtime import TaskStore, TransferLease
+    from app.worker import execute_task
+
+    configure_home(tmp_path, monkeypatch, sleep=20)
+    store = TaskStore()
+    request = SyncRequest(str(tmp_path / "local"), "example", "/sample/remote")
+    record = store.create(asdict(request), "account", "project")
+    started = threading.Event()
+    original_run = RsyncRunner.run
+
+    def run(*args, **kwargs):
+        started.set()
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr("app.worker.RsyncRunner.run", run)
+
+    def send_sigterm():
+        if started.wait(3):
+            os.kill(os.getpid(), signal.SIGTERM)
+
+    signal_thread = threading.Thread(target=send_sigterm, daemon=True)
+    signal_thread.start()
+    with TransferLease.acquire({"owner": "cli", "task_id": record["task_id"]}) as lease:
+        code = execute_task(record["task_id"], os.dup(lease.fd), None)
+    signal_thread.join(3)
+    final = store.read(record["task_id"])
+    assert code == 7
+    assert final["state"] == "cancelled" and final["terminal"]

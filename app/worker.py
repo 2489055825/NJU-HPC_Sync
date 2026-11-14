@@ -14,7 +14,26 @@ from .rsync_command import build_command, preflight
 from .rsync_runner import RsyncRunner, RunnerCallbacks
 from .runtime import CliError, TaskStore, TransferLease, process_identity, session_alive
 from .sync_service import parse_progress, summarize
-from .totp import PersistentTotpReplayGuard
+from .totp import TotpReplayGuard
+
+
+def _install_signal_handlers(runner: RsyncRunner) -> dict[int, object]:
+    """Install signal handlers that only publish cancellation intent.
+
+    Python may run a signal handler between any two bytecodes on the main
+    thread. It must not call ``RsyncRunner.cancel()`` or ``Event.set()`` here:
+    both can acquire locks, so a signal interrupting a critical section could
+    make the handler wait on the interrupted thread. The normal runner loop
+    observes the flag and performs process cleanup.
+    """
+    previous_handlers = {}
+    if threading.current_thread() is threading.main_thread():
+        def request_cancel(_signum, _frame):
+            runner.request_signal_cancel()
+
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            previous_handlers[signum] = signal.signal(signum, request_cancel)
+    return previous_handlers
 
 
 def _save_history(record: dict, request: SyncRequest, result) -> tuple[int | None, list[str]]:
@@ -69,7 +88,7 @@ def execute_task(task_id: str, lease_fd: int, ready_fd: int | None) -> int:
             validate_automatic_credential(credential)
         except (ValueError, TypeError):
             raise CliError("CREDENTIAL_INVALID", "自动认证凭据的格式无效。") from None
-        provider = AutoAuthProvider(credential, replay_guard=PersistentTotpReplayGuard(), cancel_event=cancel_event)
+        provider = AutoAuthProvider(credential, replay_guard=TotpReplayGuard(), cancel_event=cancel_event)
         check_startup_cancelled()
         secrets = provider.sensitive_values()
         fd = os.open(store.task_dir(task_id) / "output.log", os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
@@ -97,9 +116,7 @@ def execute_task(task_id: str, lease_fd: int, ready_fd: int | None) -> int:
 
         monitor = threading.Thread(target=monitor_cancel, daemon=True)
         monitor.start()
-        if threading.current_thread() is threading.main_thread():
-            for signum in (signal.SIGTERM, signal.SIGINT):
-                previous_handlers[signum] = signal.signal(signum, lambda *_args: runner.cancel())
+        previous_handlers = _install_signal_handlers(runner)
 
         last_progress = 0.0
 

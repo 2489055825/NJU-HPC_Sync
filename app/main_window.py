@@ -41,7 +41,7 @@ from .models import Direction, HistoryRecord, Profile, RunResult, RunStatus, Syn
 from .paths import normalize_directory_path, normalize_local_path, redact_text
 from .rsync_command import build_command, preflight
 from .rsync_runner import RunnerCallbacks, RsyncRunner, friendly_exit_message
-from .totp import PersistentTotpReplayGuard, TotpReplayGuard
+from .totp import TotpReplayGuard
 from .runtime import TransferLease, process_identity
 from .sync_service import changes, itemized_change, stat_value, sync_counts
 
@@ -208,7 +208,7 @@ class MainWindow(QMainWindow):
         self._last_log_status = ""
         self._transfer_index = 0
         self._transfer_total: int | None = None
-        self._totp_replay_guard = PersistentTotpReplayGuard()
+        self._totp_replay_guard = TotpReplayGuard()
         self._build_ui()
         self._load_profiles()
         if self._credential_error:

@@ -31,7 +31,7 @@ rsync -avzP --stats --itemize-changes --protect-args \
 适用于 **Ubuntu 22.04 及以上的 amd64 桌面系统**。从 [Releases](https://github.com/2489055825/NJU-HPC_Sync/releases/latest) 下载 `.deb` 安装包，在下载目录执行：
 
 ```bash
-sudo apt install ./nju-hpc-sync_1.1.0_amd64.deb
+sudo apt install ./nju-hpc-sync_1.1.1_amd64.deb
 nju-hpc-sync
 ```
 
@@ -168,7 +168,7 @@ CLI 默认使用普通同步；即使 Profile 中保存的默认模式为镜像�
 
 任务记录及脱敏日志保存在 `~/.local/share/nju-hpc-sync/tasks/`，沿用日志保留天数；活动任务不会被清理。执行进程异常退出时，结果可能不确定；存在残留传输进程时返回 `RECOVERY_REQUIRED` 并阻止新同步。操作系统重启后不会自动重跑任务，也不会自动重试失败的镜像。普通终端关闭不会影响任务，但系统关机、注销时强制清理所有用户进程等操作仍可能中断传输。
 
-以上示例使用源码启动器。安装 1.1.0 或更新版本后，可将 `./run.sh` 换成 `nju-hpc-sync`；每个命令都有 `--help`。旧版 1.0.7 安装包不包含 CLI。
+以上示例使用源码启动器。安装 1.1.1 或更新版本后，可将 `./run.sh` 换成 `nju-hpc-sync`；每个命令都有 `--help`。旧版 1.0.7 安装包不包含 CLI。
 
 <details>
 <summary>从源码运行与开发</summary>

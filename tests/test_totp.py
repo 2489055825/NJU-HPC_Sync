@@ -55,3 +55,13 @@ def test_replay_guard_prevents_reuse_across_separate_sessions():
     assert preview.last_used_counter == 3
     assert sync.last_used_counter == 4
     assert sleeps
+
+
+def test_replay_guard_rejects_windows_older_than_the_latest_claim():
+    guard = TotpReplayGuard()
+    config = TotpConfig("JBSWY3DPEHPK3PXP")
+
+    assert guard.claim(config, 5)
+    assert not guard.claim(config, 4)
+    assert not guard.claim(config, 5)
+    assert guard.claim(config, 6)

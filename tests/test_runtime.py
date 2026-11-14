@@ -72,38 +72,11 @@ def test_process_identity_rejects_reused_pid():
     assert not process_matches({**identity, "start_ticks": "0"})
 
 
-def test_persistent_totp_windows_survive_new_instances_and_hide_secret(tmp_path):
-    from app.totp import PersistentTotpReplayGuard, TotpConfig
-
-    config = TotpConfig("JBSWY3DPEHPK3PXP")
-    path = tmp_path / "totp-windows.json"
-    assert PersistentTotpReplayGuard(path).claim(config, 3)
-    assert not PersistentTotpReplayGuard(path).claim(config, 3)
-    assert not PersistentTotpReplayGuard(path).claim(config, 2)
-    assert PersistentTotpReplayGuard(path).claim(config, 4)
-    assert config.secret not in path.read_text(encoding="utf-8")
-    assert os.stat(path).st_mode & 0o777 == 0o600
-
-
-def test_concurrent_processes_cannot_claim_same_totp_window(tmp_path):
-    from tests.cli_helpers import configure_home
-
-    env = configure_home(tmp_path)
-    script = ("from app.credential_store import CredentialStore; "
-              "from app.totp import PersistentTotpReplayGuard,TotpConfig; "
-              "c=CredentialStore().load()['account']; "
-              "print(PersistentTotpReplayGuard().claim(TotpConfig(c.totp_secret),3))")
-    processes = [subprocess.Popen([sys.executable, "-c", script], env=env, stdout=subprocess.PIPE, text=True)
-                 for _ in range(2)]
-    outcomes = [process.communicate(timeout=4)[0].strip() for process in processes]
-    assert sorted(outcomes) == ["False", "True"]
-
-
-def test_equivalent_base32_keys_cannot_reuse_a_window(tmp_path):
-    from app.totp import PersistentTotpReplayGuard, TotpConfig, TotpReplayGuard, generate_code
+def test_in_memory_totp_guard_normalizes_equivalent_base32_keys():
+    from app.totp import TotpConfig, TotpReplayGuard, generate_code
 
     unpadded, padded = TotpConfig("MY"), TotpConfig("MY======")
     assert generate_code(unpadded, 100) == generate_code(padded, 100)
-    for guard in (TotpReplayGuard(), PersistentTotpReplayGuard(tmp_path / "windows.json")):
-        assert guard.claim(unpadded, 3)
-        assert not guard.claim(padded, 3)
+    guard = TotpReplayGuard()
+    assert guard.claim(unpadded, 3)
+    assert not guard.claim(padded, 3)

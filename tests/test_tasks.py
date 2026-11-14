@@ -172,6 +172,32 @@ def test_cancel_of_known_session_retains_uncertainty_for_an_unknown_lease_holder
                 child.wait(timeout=3)
 
 
+@pytest.mark.parametrize("state,success,exit_code", [("succeeded", True, 0),
+                                                    ("cancelled", False, 7), ("failed", False, 6)])
+def test_cancel_timeout_preserves_task_terminal_state(tmp_path, monkeypatch, state, success, exit_code):
+    from app.runtime import CliError, TaskStore
+    from app.tasks import cancel_task
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    store = TaskStore()
+    record = store.create({}, "account", "")
+    task_id = record["task_id"]
+    store.update(task_id, state="running", terminal=False)
+
+    def timeout(_task_id, _timeout):
+        store.update(task_id, state=state, terminal=True, transfer_success=success, cli_exit_code=exit_code)
+        raise CliError("WAIT_TIMEOUT", "等待超时。", 124, task_id=task_id, task=store.read(task_id))
+
+    monkeypatch.setattr("app.tasks.wait_task", timeout)
+
+    result = cancel_task(task_id, timeout=0)
+
+    assert result["state"] == state
+    assert result["terminal"] and result["transfer_success"] is success
+    assert result["cli_exit_code"] == exit_code
+    assert result["cancel_requested"]
+
+
 def test_cancel_stops_descendant_even_after_pty_leader_exits(tmp_path, monkeypatch):
     from app.runtime import process_identity, process_matches
     from app.tasks import cancel_task, submit_task

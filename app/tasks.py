@@ -172,4 +172,7 @@ def cancel_task(task_id: str | None = None, timeout: float = 10) -> dict:
     except CliError as exc:
         if exc.exit_code != 124:
             raise
-        return {**get_task(task_id), "state": "cancelling", "cancel_requested": True}
+        current = get_task(task_id)
+        if current["terminal"] or current["state"] == "interrupted":
+            return {**current, "cancel_requested": True}
+        return {**current, "state": "cancelling", "cancel_requested": True}

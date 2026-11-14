@@ -1,6 +1,8 @@
 import json
 import os
 import signal
+import subprocess
+import sys
 import threading
 from dataclasses import asdict
 
@@ -118,3 +120,54 @@ def test_worker_defers_sigterm_cleanup_until_runner_control_flow(tmp_path, monke
     final = store.read(record["task_id"])
     assert code == 7
     assert final["state"] == "cancelled" and final["terminal"]
+
+
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT])
+def test_signal_cancels_worker_during_totp_window_wait(tmp_path, monkeypatch, signum):
+    from app.models import SyncRequest
+    from app.runtime import TaskStore, TransferLease, session_alive, stop_session
+    from tests.cli_helpers import pump
+
+    env = configure_home(tmp_path, monkeypatch, authenticate=True)
+    store = TaskStore()
+    record = store.create(asdict(SyncRequest(str(tmp_path / "local"), "example", "/sample/remote")),
+                          "account", "project")
+    task_id = record["task_id"]
+    script = '''import sys
+from pathlib import Path
+from app import worker
+original = worker.AutoAuthProvider
+def provider(*args, **kwargs):
+    value = original(*args, **kwargs)
+    value.session.clock = lambda: 100.0
+    value.session.replay_guard.claim(value.session.config, 3)
+    wait = value.session._wait
+    def waiting(delay):
+        (Path.home() / 'waiting-totp').touch()
+        wait(delay)
+    value.session._wait = waiting
+    return value
+worker.AutoAuthProvider = provider
+raise SystemExit(worker.execute_task(sys.argv[1], int(sys.argv[2]), None))
+'''
+    child = None
+    try:
+        with TransferLease.acquire({"owner": "cli", "task_id": task_id}) as lease:
+            child = subprocess.Popen([sys.executable, "-c", script, task_id, str(lease.fd)],
+                                     env=env, pass_fds=(lease.fd,), start_new_session=True,
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            lease.close()
+            pump((tmp_path / "waiting-totp").exists)
+            child.send_signal(signum)
+            assert child.wait(timeout=3) == 7
+        final = store.read(task_id)
+        assert final["state"] == "cancelled" and final["terminal"]
+        assert not session_alive(final.get("child_process"))
+        with TransferLease.acquire({"owner": "test"}):
+            pass  # Cancelled task released the inherited lease, too.
+    finally:
+        if child is not None:
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=3)
+        stop_session(store.read(task_id).get("child_process"))

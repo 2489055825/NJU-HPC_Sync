@@ -11,6 +11,10 @@ DEFAULT_LOG_RETENTION_DAYS = 60
 LOG_RETENTION_KEY = "log_retention_days"
 
 
+class ProfileDataError(ValueError):
+    """An incompatible schema or invalid Profile row, without private values."""
+
+
 class Database:
     def __init__(self, path: str | Path | None = None, *, readonly: bool = False):
         self.path = Path(path or Path.home() / ".local" / "share" / "nju-hpc-sync" / "nju-hpc-sync.sqlite3").expanduser()
@@ -155,7 +159,22 @@ class Database:
 
     @staticmethod
     def _profile(row: sqlite3.Row) -> Profile:
-        return Profile(**dict(row))
+        try:
+            profile = Profile(**dict(row))
+            if type(profile.id) is not int:
+                raise ValueError("invalid stored profile identifier")
+            strings = (profile.name, profile.local_path, profile.remote_host, profile.remote_path,
+                       profile.credential_name, profile.created_at, profile.updated_at)
+            if not all(isinstance(value, str) for value in strings):
+                raise ValueError("invalid profile field type")
+            if not all(value.strip() for value in strings[:4]):
+                raise ValueError("empty required profile field")
+            # Validate enum values before either GUI or CLI consumes them.
+            profile.direction
+            profile.mode
+            return profile
+        except (TypeError, ValueError):
+            raise ProfileDataError("PROFILE_CONFIG_INVALID: Profile 字段或数据库结构不兼容，请检查已有配置。") from None
 
     @staticmethod
     def _history(row: sqlite3.Row) -> HistoryRecord:

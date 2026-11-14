@@ -88,7 +88,7 @@ class TotpCancelled(Exception):
 class TotpSession:
     """Generate passwords without reusing a TOTP time window."""
 
-    def __init__(self, static_password: str, config: TotpConfig, safety_seconds: int = 3, clock: Callable[[], float] = time.time, sleeper: Callable[[float], None] = time.sleep, replay_guard: TotpReplayGuard | None = None, cancel_event: threading.Event | None = None):
+    def __init__(self, static_password: str, config: TotpConfig, safety_seconds: int = 3, clock: Callable[[], float] = time.time, sleeper: Callable[[float], None] = time.sleep, replay_guard: TotpReplayGuard | None = None, cancel_event: threading.Event | None = None, cancel_check: Callable[[], bool] | None = None):
         self.static_password = static_password
         self.config = config
         self.safety_seconds = safety_seconds
@@ -96,6 +96,7 @@ class TotpSession:
         self.sleeper = sleeper
         self.replay_guard = replay_guard
         self.cancel_event = cancel_event
+        self.cancel_check = cancel_check
         self.last_used_counter: int | None = None
         self.last_used_totp: str | None = None
 
@@ -119,11 +120,24 @@ class TotpSession:
             return f"{self.static_password} {code}"
 
     def _check_cancelled(self) -> None:
-        if self.cancel_event is not None and self.cancel_event.is_set():
+        if ((self.cancel_event is not None and self.cancel_event.is_set())
+                or (self.cancel_check is not None and self.cancel_check())):
             raise TotpCancelled()
 
     def _wait(self, delay: float) -> None:
-        if self.cancel_event is None:
+        if self.cancel_check is not None:
+            # Signals only set a lock-free runner flag. Poll it in normal
+            # control flow so a full TOTP window never delays cancellation.
+            deadline = time.monotonic() + delay
+            while (remaining := deadline - time.monotonic()) > 0:
+                self._check_cancelled()
+                interval = min(.1, remaining)
+                if self.cancel_event is None:
+                    self.sleeper(interval)
+                else:
+                    self.cancel_event.wait(interval)
+            self._check_cancelled()
+        elif self.cancel_event is None:
             self.sleeper(delay)
         elif self.cancel_event.wait(delay):
             raise TotpCancelled()

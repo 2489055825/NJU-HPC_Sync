@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import re
 import shlex
+import sqlite3
 from dataclasses import replace
 from pathlib import Path
 
@@ -34,7 +35,7 @@ from PySide6.QtWidgets import (
 
 from .auth import AuthenticationCancelled, AutoAuthProvider
 from .credential_store import CredentialStore
-from .database import Database
+from .database import Database, ProfileDataError
 from .dialogs import CredentialsDialog, HistoryDialog, HostConfigDialog, LogManagementDialog, PasswordDialog, ProfileDialog, UsageDialog
 from .host_selector import SshHostSelector
 from .models import Direction, HistoryRecord, Profile, RunResult, RunStatus, SyncMode, SyncRequest, format_local_time
@@ -400,7 +401,12 @@ class MainWindow(QMainWindow):
             selected_profile_id = current_item.data(256)
         current_row = self.profile_list.currentRow()
         scroll_position = self.profile_list.verticalScrollBar().value()
-        self._profiles = self.db.list_profiles()
+        try:
+            profiles = self.db.list_profiles()
+        except (ProfileDataError, sqlite3.Error):
+            self.statusBar().showMessage("PROFILE_CONFIG_INVALID: 无法读取 Profile，请检查已有配置。")
+            return
+        self._profiles = profiles
         self.profile_list.clear()
         for profile in self._profiles:
             item = QListWidgetItem(profile.name)

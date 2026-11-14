@@ -40,7 +40,7 @@ class ManualAuthProvider:
 
 
 class AutoAuthProvider:
-    def __init__(self, credential: Credential, wait_notice: Callable[[str], None] | None = None, replay_guard: TotpReplayGuard | None = None, cancel_event: threading.Event | None = None):
+    def __init__(self, credential: Credential, wait_notice: Callable[[str], None] | None = None, replay_guard: TotpReplayGuard | None = None, cancel_event: threading.Event | None = None, cancel_check: Callable[[], bool] | None = None):
         if not credential.static_password:
             raise ValueError("自动认证需要固定密码")
         if not credential.totp_secret:
@@ -52,6 +52,7 @@ class AutoAuthProvider:
             TotpConfig(credential.totp_secret, credential.totp_algorithm, credential.totp_period, credential.totp_digits),
             replay_guard=replay_guard,
             cancel_event=cancel_event,
+            cancel_check=cancel_check,
         )
         self._prompt_count = 0
 

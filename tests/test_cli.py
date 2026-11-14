@@ -54,6 +54,44 @@ def test_temporary_download_mirror_preview(tmp_path):
     assert value["request"]["remote_path"] == "/sample/remote/"
 
 
+@pytest.mark.parametrize("problem", ["extra_column", "blob_id", "missing_required", "null_field",
+                                    "invalid_direction", "invalid_mode"])
+def test_malformed_profile_schema_returns_structured_config_error(tmp_path, problem):
+    from app.database import Database
+    from app.models import Profile
+
+    database_path = tmp_path / ".local/share/nju-hpc-sync/nju-hpc-sync.sqlite3"
+    with Database(database_path) as db:
+        db.save_profile(Profile("example", "/tmp/local", "example", "/remote"))
+        if problem == "extra_column":
+            db._connection.execute("ALTER TABLE profiles ADD COLUMN legacy_value TEXT")
+        else:
+            # Model an older/unconstrained schema, including values SQLite's
+            # normal INTEGER PRIMARY KEY or NOT NULL columns would reject.
+            db._connection.execute("CREATE TABLE old_profiles AS SELECT * FROM profiles")
+            db._connection.execute("DROP TABLE profiles")
+            db._connection.execute("ALTER TABLE old_profiles RENAME TO profiles")
+            if problem == "blob_id":
+                db._connection.execute("UPDATE profiles SET id = ?", (b"old-id",))
+            elif problem == "missing_required":
+                db._connection.execute("ALTER TABLE profiles DROP COLUMN local_path")
+            elif problem == "null_field":
+                db._connection.execute("UPDATE profiles SET local_path = NULL")
+            elif problem == "invalid_direction":
+                db._connection.execute("UPDATE profiles SET default_direction = 'sideways'")
+            elif problem == "invalid_mode":
+                db._connection.execute("UPDATE profiles SET default_mode = 'unknown'")
+        db._connection.commit()
+
+    before = database_path.read_bytes()
+    result = cli({**os.environ, "HOME": str(tmp_path)}, "profiles", "list", "--json")
+
+    assert result.returncode == 2
+    assert json.loads(result.stdout)["error"]["code"] == "CONFIG_INVALID"
+    assert "TypeError" not in result.stderr
+    assert database_path.read_bytes() == before
+
+
 @pytest.mark.parametrize("args", [
     ["sync", "--profile", "project", "--local", "/tmp/source"],
     ["sync", "--local", "/tmp/source", "--host", "example", "--remote", "/sample/remote"],

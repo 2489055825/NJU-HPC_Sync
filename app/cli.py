@@ -15,7 +15,7 @@ from pathlib import Path
 
 from .credential_store import CredentialStore
 from .auth import validate_automatic_credential
-from .database import Database
+from .database import Database, ProfileDataError
 from .models import Direction, SyncMode, SyncRequest
 from .runtime import CliError, data_root
 from .ssh_config import read_ssh_hosts
@@ -211,7 +211,7 @@ def _doctor() -> dict:
     try:
         _profiles()
         checks.append({"name": "database", "ok": True})
-    except (OSError, sqlite3.Error):
+    except (OSError, sqlite3.Error, ProfileDataError):
         checks.append({"name": "database", "ok": False})
     parent = data_root()
     while not parent.exists() and parent != parent.parent:

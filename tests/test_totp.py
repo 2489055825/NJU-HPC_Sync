@@ -1,6 +1,7 @@
 import time
+import pytest
 
-from app.totp import TotpConfig, TotpReplayGuard, TotpSession, generate_code, remaining_seconds
+from app.totp import TotpCancelled, TotpConfig, TotpReplayGuard, TotpSession, generate_code, remaining_seconds
 
 
 def test_rfc6238_known_code():
@@ -65,3 +66,17 @@ def test_replay_guard_rejects_windows_older_than_the_latest_claim():
     assert not guard.claim(config, 4)
     assert not guard.claim(config, 5)
     assert guard.claim(config, 6)
+
+
+def test_totp_wait_observes_lock_free_cancellation_check():
+    cancelled = [False]
+    session = TotpSession(
+        "static", TotpConfig("JBSWY3DPEHPK3PXP"), safety_seconds=0,
+        clock=lambda: 100.0,
+        sleeper=lambda _delay: cancelled.__setitem__(0, True),
+        cancel_check=lambda: cancelled[0],
+    )
+    session.last_used_counter = 3
+
+    with pytest.raises(TotpCancelled):
+        session.next_password()

@@ -31,7 +31,7 @@ rsync -avzP --stats --itemize-changes --protect-args \
 适用于 **Ubuntu 22.04 及以上的 amd64 桌面系统**。从 [Releases](https://github.com/2489055825/NJU-HPC_Sync/releases/latest) 下载 `.deb` 安装包，在下载目录执行：
 
 ```bash
-sudo apt install ./nju-hpc-sync_1.1.1_amd64.deb
+sudo apt install ./nju-hpc-sync_1.1.2_amd64.deb
 nju-hpc-sync
 ```
 

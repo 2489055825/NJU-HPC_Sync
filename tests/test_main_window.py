@@ -31,6 +31,24 @@ def test_final_status_clears_current_file(tmp_path):
     app.processEvents()
 
 
+def test_invalid_profile_row_does_not_crash_gui_or_change_database(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    path = tmp_path / "invalid.sqlite3"
+    db = Database(path)
+    db.save_profile(Profile("example", "/tmp/local", "example", "/remote"))
+    db._connection.execute("ALTER TABLE profiles ADD COLUMN legacy_value TEXT")
+    db._connection.commit()
+    before = path.read_bytes()
+    window = MainWindow(db, CredentialStore(tmp_path / "credentials.json"))
+    try:
+        assert window.profile_list.count() == 0
+        assert "PROFILE_CONFIG_INVALID" in window.statusBar().currentMessage()
+        assert path.read_bytes() == before
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_transfer_progress_is_parsed_and_displayed(tmp_path):
     app = QApplication.instance() or QApplication([])
     window = MainWindow(Database(tmp_path / "app.sqlite3"), CredentialStore(tmp_path / "credentials.json"))

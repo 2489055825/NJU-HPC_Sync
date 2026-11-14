@@ -88,7 +88,8 @@ def execute_task(task_id: str, lease_fd: int, ready_fd: int | None) -> int:
             validate_automatic_credential(credential)
         except (ValueError, TypeError):
             raise CliError("CREDENTIAL_INVALID", "自动认证凭据的格式无效。") from None
-        provider = AutoAuthProvider(credential, replay_guard=TotpReplayGuard(), cancel_event=cancel_event)
+        provider = AutoAuthProvider(credential, replay_guard=TotpReplayGuard(), cancel_event=cancel_event,
+                                    cancel_check=runner._cancel_requested)
         check_startup_cancelled()
         secrets = provider.sensitive_values()
         fd = os.open(store.task_dir(task_id) / "output.log", os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)

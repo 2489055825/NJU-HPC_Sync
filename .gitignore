@@ -59,3 +59,6 @@ Linux HPC rsync 图形同步工具开发提示词.md
 Thumbs.db
 *.swp
 *.swo
+
+# Local planning and prompt notes (not versioned)
+docs/

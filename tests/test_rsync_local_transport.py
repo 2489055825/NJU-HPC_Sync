@@ -92,6 +92,8 @@ def test_real_rsync_preview_mirror_and_download(tmp_path, packaged):
     ("空 格'\";$name/child[1]", "空 格'\";$name/child1"),
     ("$(touch shell-marker)`touch shell-marker`", "other"),
     ("line\n[1]", "line\n1"),
+    ("data ", "data"),
+    (" data", "data"),
 ])
 def test_literal_remote_directory_never_selects_glob_decoy(tmp_path, packaged, literal, decoy):
     command = cli_command(packaged)
@@ -215,3 +217,48 @@ def test_relative_upload_starting_with_colon_remains_an_ssh_directory(tmp_path, 
         env=env, capture_output=True, text=True, timeout=10)
     assert completed.returncode == 0, completed.stderr + completed.stdout
     assert (tmp_path / ":data/uploaded.txt").read_text() == "literal colon directory\n"
+
+
+@pytest.mark.parametrize("packaged", [False, True], ids=["source", "packaged"])
+@pytest.mark.parametrize("name", ["local ", " local"])
+def test_local_whitespace_directory_never_mirrors_trimmed_decoy(tmp_path, packaged, name):
+    command = cli_command(packaged)
+    env = configure_real_transport(tmp_path)
+    local, decoy, remote = tmp_path / name, tmp_path / "local", tmp_path / "remote"
+    local.mkdir()
+    remote.mkdir()
+    (local / "must_keep.txt").write_text("correct source\n")
+    (decoy / "wrong.txt").write_text("wrong source\n")
+    (remote / "must_keep.txt").write_text("correct source\n")
+    for direction in ("upload", "download"):
+        completed = subprocess.run(
+            [*command, "sync", "--mirror", "--local", str(local), "--host", "example",
+             "--remote", str(remote), "--direction", direction, "--credential", "account", "--json"],
+            env=env, capture_output=True, text=True, timeout=10)
+        assert completed.returncode == 0, completed.stderr + completed.stdout
+        assert json.loads(completed.stdout)["request"]["local_path"] == str(local) + "/"
+        assert (remote / "must_keep.txt").read_text() == "correct source\n"
+        assert (local / "must_keep.txt").read_text() == "correct source\n"
+        assert not (remote / "wrong.txt").exists()
+        assert not (local / "wrong.txt").exists()
+        assert (decoy / "wrong.txt").read_text() == "wrong source\n"
+
+
+@pytest.mark.parametrize("packaged", [False, True], ids=["source", "packaged"])
+def test_prompt_like_filenames_return_success_after_real_transfer(tmp_path, packaged):
+    command = cli_command(packaged)
+    env = configure_real_transport(tmp_path)
+    local, remote = tmp_path / "local", tmp_path / "remote"
+    names = [f"{i}-password:notes.txt" for i in range(4)]
+    for name in names:
+        (local / name).write_text("ordinary file contents\n")
+    completed = subprocess.run(
+        [*command, "sync", "--local", str(local), "--host", "example", "--remote", str(remote),
+         "--direction", "upload", "--credential", "account", "--json"],
+        env=env, capture_output=True, text=True, timeout=10)
+    assert completed.returncode == 0, completed.stderr + completed.stdout
+    result = json.loads(completed.stdout)
+    assert result["transfer_success"] and result["state"] == "succeeded"
+    assert result["summary"]["transferred_files"] == 4
+    for name in names:
+        assert (remote / name).read_text() == "ordinary file contents\n"

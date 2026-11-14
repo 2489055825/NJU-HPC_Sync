@@ -403,7 +403,7 @@ class CredentialsDialog(QDialog):
             self._new()
 
     def _new(self) -> None:
-        self.list.clearSelection()
+        self.list.setCurrentRow(-1)
         self._editing_name = ""
         self.name.clear()
         self.static_password.clear()
@@ -431,10 +431,12 @@ class CredentialsDialog(QDialog):
 
     def _save(self) -> None:
         try:
-            credential = Credential(self.name.text().strip(), self.static_password.text(), self.totp_secret.text(), self.algorithm.currentText(), self.period.value(), self.digits.value())
+            config = TotpConfig(self.totp_secret.text(), self.algorithm.currentText(), self.period.value(), self.digits.value())
+            credential = Credential(self.name.text().strip(), self.static_password.text(), config.secret, config.algorithm, config.period, config.digits)
             credential.validate()
-            if not credential.totp_secret:
-                raise ValueError("TOTP Secret 不能为空")
+            if credential.name != self._editing_name and credential.name in self.credentials:
+                raise ValueError("已存在同名凭据，请使用其他名称")
+            generate_code(config, 0)
             candidate = dict(self.credentials)
             if self._editing_name and self._editing_name != credential.name:
                 candidate.pop(self._editing_name, None)
@@ -465,7 +467,7 @@ class CredentialsDialog(QDialog):
         self.credentials_changed.emit()
 
     def _refresh_code(self) -> None:
-        secret = self.totp_secret.text().strip()
+        secret = TotpConfig(self.totp_secret.text()).secret
         if not secret:
             self.code.setText("未配置")
             self.remaining.clear()

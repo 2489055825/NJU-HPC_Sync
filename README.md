@@ -20,7 +20,7 @@ rsync -avzP --stats --itemize-changes --protect-args \
 | 预览 | 增加 `--dry-run`，查看预计变化，不实际传输或删除 |
 | 强制镜像 | 增加 `--delete`，**删除目标目录中源目录没有的文件**；每次执行前都需要预览并确认，运行期间锁定任务参数 |
 
-程序同步的是**目录里的内容**，会自动补齐路径末尾的 `/`。
+程序同步的是**目录里的内容**，会自动补齐路径末尾的 `/`。路径中的首尾空格属于目录名称，会原样保留。
 
 远程目录按填写的字面值处理：`data[1]`、`data*` 等名称不会展开成其他目录。上传时程序对完整远程路径做 shell 引用；下载时先进入经过完整引用的源目录，再通过受保护参数通道同步 `./`，避免 rsync 展开原始目录名。源目录不存在时直接失败，不会改用相似名称的目录。请直接填写目录名称，无需额外添加引号或反斜杠。上面的等价命令使用不含特殊字符的示例路径。
 
@@ -31,7 +31,7 @@ rsync -avzP --stats --itemize-changes --protect-args \
 适用于 **Ubuntu 22.04 及以上的 amd64 桌面系统**。从 [Releases](https://github.com/2489055825/NJU-HPC_Sync/releases/latest) 下载 `.deb` 安装包，在下载目录执行：
 
 ```bash
-sudo apt install ./nju-hpc-sync_1.1.2_amd64.deb
+sudo apt install ./nju-hpc-sync_1.1.3_amd64.deb
 nju-hpc-sync
 ```
 

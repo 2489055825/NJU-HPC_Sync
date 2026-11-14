@@ -48,3 +48,44 @@ def test_headless_authentication_timeout_does_not_wait_forever():
     assert result.status is RunStatus.FAILED
     assert "SSH_AUTH_TIMEOUT" in result.output
     assert result.duration < 3
+
+
+@pytest.mark.parametrize("banner_delay", [None, 0, .35])
+def test_transfer_filenames_never_request_authentication(banner_delay):
+    import textwrap
+    script = textwrap.dedent(f"""
+        import sys, time
+        delay = {banner_delay!r}
+        if delay is not None:
+            print('sending incremental file list', flush=True)
+            time.sleep(delay)
+        for word in ('password', 'passphrase', 'verification code', 'otp'):
+            print('>f+++++++++ 1-' + word + ':notes.txt', flush=True)
+        print('*deleting   password:old.txt', flush=True)
+        print('Number of regular files transferred: 4', flush=True)
+    """)
+    prompts = []
+    result = RsyncRunner().run([sys.executable, "-c", script], RunnerCallbacks(
+        on_prompt=lambda prompt: prompts.append(prompt)), authentication_timeout=2)
+    assert result.status is RunStatus.SUCCESS
+    assert prompts == []
+    assert "Number of regular files transferred: 4" in result.output
+
+
+def test_standard_encrypted_key_passphrase_prompt_and_password_retry():
+    import textwrap
+    script = textwrap.dedent("""
+        import sys
+        for prompt in ("Enter passphrase for key '/tmp/synthetic-key': ",
+                       "user@host's password: ", "user@host's password: "):
+            print(prompt, end='', flush=True)
+            if sys.stdin.readline().strip() != 'synthetic-response':
+                sys.exit(2)
+        print('sending incremental file list', flush=True)
+    """)
+    prompts = []
+    result = RsyncRunner().run([sys.executable, "-c", script], RunnerCallbacks(
+        on_prompt=lambda prompt: prompts.append(prompt) or "synthetic-response"), authentication_timeout=.5)
+    assert result.status is RunStatus.SUCCESS
+    assert len(prompts) == 3
+    assert "Enter passphrase for key" in prompts[0]

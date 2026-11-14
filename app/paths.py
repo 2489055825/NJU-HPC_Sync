@@ -6,8 +6,7 @@ from pathlib import Path
 
 
 def normalize_local_path(value: str) -> str:
-    value = value.strip()
-    if not value:
+    if not value.strip():
         raise ValueError("本地路径不能为空")
     path = Path(os.path.expanduser(value))
     return str(path)
@@ -15,8 +14,7 @@ def normalize_local_path(value: str) -> str:
 
 def normalize_directory_path(value: str) -> str:
     """Return a directory path with exactly one trailing slash for rsync."""
-    value = value.strip()
-    if not value:
+    if not value.strip():
         raise ValueError("路径不能为空")
     if value == "/":
         return "/"
@@ -33,8 +31,8 @@ def validate_remote_host(value: str) -> str:
 
 
 def validate_remote_path(value: str) -> str:
-    path = value.strip()
-    if not path:
+    path = value
+    if not path.strip():
         raise ValueError("远程路径不能为空")
     if "\x00" in path:
         raise ValueError("路径包含非法字符")

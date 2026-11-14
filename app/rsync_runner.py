@@ -18,7 +18,11 @@ from .runtime import process_identity, stop_session
 
 # OpenSSH commonly prints `user@host's password:` on one line, while
 # keyboard-interactive gateways may use `Verification code:` or `OTP:`.
-PROMPT_PATTERN = r"(?im)(?:^|[\r\n])[^\r\n]{0,160}?(?:password|passphrase|verification code|otp)\s*[:：]\s*"
+PROMPT_PATTERN = (
+    r"(?im)(?:^|[\r\n])(?![<>ch.][fdLDS][^\r\n]{9} |\*deleting\s)"
+    r"[^\r\n]{0,160}?(?:passphrase[ \t]+for[ \t]+key[ \t]+[^\r\n]+?['\"]"
+    r"|password|passphrase|verification code|otp)[ \t]*[:：][ \t]*"
+)
 HOST_KEY_PATTERN = r"(?im)(?:^|[\r\n])Are you sure you want to continue connecting\s*\(yes/no(?:/\[fingerprint\])?\)\?\s*"
 
 
@@ -135,12 +139,17 @@ class RsyncRunner:
                 callbacks.on_started(child.pid)
             check_cancelled()
             emitted_buffer = ""
+            transfer_started = False
             while True:
                 check_cancelled()
-                index = child.expect([HOST_KEY_PATTERN, PROMPT_PATTERN, pexpect.EOF, pexpect.TIMEOUT])
+                patterns = [pexpect.EOF, pexpect.TIMEOUT] if transfer_started else [HOST_KEY_PATTERN, PROMPT_PATTERN, pexpect.EOF, pexpect.TIMEOUT]
+                index = child.expect(patterns)
+                if transfer_started:
+                    index += 2
                 before = child.before or ""
                 if before:
                     if re_transfer_started(before):
+                        transfer_started = True
                         authentication_timeout = None
                     # pexpect keeps an unmatched PTY buffer across TIMEOUTs.
                     # Emit only the part that was not sent on the previous read.
@@ -153,6 +162,11 @@ class RsyncRunner:
                     # A successful match consumes `before` and the prompt.
                     emitted_buffer = ""
                     check_cancelled()
+                    # The banner and a prompt-like filename may arrive in one
+                    # read. Authentication has finished; preserve it as output.
+                    if transfer_started:
+                        emit_output(child.after or "")
+                        continue
                     if index == 0:
                         prompt = redact_text(before[-4096:] + (child.after or ""), self._secrets)
                         if callbacks.on_host_key is None or not callbacks.on_host_key(prompt):

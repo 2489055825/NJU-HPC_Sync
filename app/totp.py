@@ -25,6 +25,11 @@ class TotpConfig:
     period: int = 30
     digits: int = 6
 
+    def __post_init__(self) -> None:
+        # Base32 secrets are commonly pasted in groups or with a final newline.
+        # Use one representation for preview, authentication and replay checks.
+        self.secret = "".join(self.secret.split()).upper()
+
     def validate(self) -> None:
         if not self.secret:
             raise ValueError("TOTP Secret 不能为空")
@@ -42,7 +47,7 @@ def generate_code(config: TotpConfig, for_time: float | None = None) -> str:
         digest = getattr(hashlib, algorithm.lower())
         return pyotp.TOTP(config.secret, digits=config.digits, interval=config.period, digest=digest).at(now)
     try:
-        key = base64.b32decode(config.secret.strip().replace(" ", "").upper() + "=" * ((8 - len(config.secret.strip().replace(" ", "")) % 8) % 8), casefold=True)
+        key = base64.b32decode(config.secret + "=" * (-len(config.secret) % 8), casefold=True)
     except Exception as exc:
         raise ValueError("TOTP Secret 不是有效的 Base32 字符串") from exc
     counter = int(now // config.period)
@@ -76,7 +81,7 @@ class TotpReplayGuard:
 
 
 def _window_identity(config: TotpConfig) -> tuple[bytes, str, int, int]:
-    text = config.secret.strip().replace(" ", "").upper()
+    text = config.secret
     secret = base64.b32decode(text + "=" * (-len(text) % 8), casefold=True)
     return secret, config.algorithm.upper(), config.period, config.digits
 

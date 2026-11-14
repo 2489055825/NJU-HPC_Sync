@@ -1,8 +1,27 @@
 from pathlib import Path
 
+import pytest
+
 from app.models import Direction, SyncMode, SyncRequest
 from app.paths import redact_text
 from app.rsync_command import build_command, preflight
+
+
+@pytest.mark.parametrize("value", ["/tmp/source ", " source", "/tmp/source\t"])
+def test_command_preserves_literal_path_whitespace(value):
+    request = SyncRequest(value, "nju", value, Direction.UPLOAD)
+    command = build_command(request)
+    import shlex
+    assert command[-2] == value + "/"
+    assert shlex.split(command[-1].removeprefix("nju:")) == [value + "/" if value.startswith("/") else "./" + value + "/"]
+
+
+@pytest.mark.parametrize("value", ["", "  ", "\t\n"])
+def test_blank_paths_remain_invalid(value):
+    from app.paths import normalize_local_path, normalize_directory_path, validate_remote_path
+    for normalize in (normalize_local_path, normalize_directory_path, validate_remote_path):
+        with pytest.raises(ValueError):
+            normalize(value)
 
 
 def test_upload_uses_directory_contents_and_argv_paths():

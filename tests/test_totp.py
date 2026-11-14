@@ -10,6 +10,20 @@ def test_rfc6238_known_code():
     assert generate_code(config, 59) == "94287082"
 
 
+@pytest.mark.parametrize("fallback", [False, True], ids=["pyotp", "fallback"])
+def test_legacy_secret_whitespace_uses_same_rfc_code(monkeypatch, fallback):
+    if fallback:
+        monkeypatch.setattr("app.totp.pyotp", None)
+    config = TotpConfig(" \tgezd gnbv gy3t qojq\n gezd gnbv gy3t qojq ", "SHA1", 30, 8)
+    assert generate_code(config, 59) == "94287082"
+
+
+def test_formatted_secret_cannot_bypass_in_memory_replay_guard():
+    guard = TotpReplayGuard()
+    assert guard.claim(TotpConfig("JBSWY3DPEHPK3PXP"), 5)
+    assert not guard.claim(TotpConfig(" jbsw\ty3dp\nehpk3pxp "), 5)
+
+
 def test_remaining_seconds_is_at_least_one():
     assert remaining_seconds(30, 59.9) == 1
 

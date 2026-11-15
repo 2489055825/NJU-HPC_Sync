@@ -31,7 +31,7 @@ rsync -avzP --stats --itemize-changes --protect-args \
 适用于 **Ubuntu 22.04 及以上的 amd64 桌面系统**。从 [Releases](https://github.com/2489055825/NJU-HPC_Sync/releases/latest) 下载 `.deb` 安装包，在下载目录执行：
 
 ```bash
-sudo apt install ./nju-hpc-sync_1.1.4_amd64.deb
+sudo apt install ./nju-hpc-sync_1.1.5_amd64.deb
 nju-hpc-sync
 ```
 
@@ -158,6 +158,8 @@ CLI 默认使用普通同步；即使 Profile 中保存的默认模式为镜像�
 
 提交客户端在后台进程初始化期间退出，任务仍保持活动状态。此时的取消请求也会保存；后台进程继续初始化后，会在启动 rsync 前处理请求，最终返回 `state=cancelled`、`terminal=true` 和退出码 7。
 
+Ctrl+C 的处理也覆盖提交和启动交接阶段：尚未创建任务时返回 `SUBMIT_INTERRUPTED`；已创建记录但尚未启动后台进程时，保留任务编号并将记录标为取消。后台进程已经启动时，只结束客户端等待并返回任务编号，后台任务继续初始化或传输。`--json` 下均返回一个 JSON 结果，客户端退出码为 130（SIGINT）、143（SIGTERM）或 129（SIGHUP）。若状态暂时无法读取，返回已知任务编号及 `state=unknown`，请先查询状态再决定是否重试。
+
 同一用户的新版 GUI 和 CLI 一次只执行一个预览或同步任务。已有任务时，新提交返回 `BUSY` 和占用者信息，不排队。CLI 不控制 GUI 任务。遇到陌生主机指纹需要确认时，先人工核对并完成 SSH 信任配置，再重试；软件不会自动接受主机指纹。
 
 `--json` 让 stdout 只返回一个 JSON 结果对象，进度和任务编号输出到 stderr，便于 agent 自动读取。最终任务字段包括 `task_id`、`state`、`terminal`、`transfer_success`、`rsync_exit_code`、`summary`、`history_saved` 和 `error`。`summary` 提供传输文件数、新增/更新/删除条目总数和字节数；变更样例最多 100 条，总数在截断前计算。`--detach` 的 `accepted=true` 只表示后台已接管，`terminal=false` 时仍需查询或等待最终结果；未知统计为 `null`。`status` 成功读取失败任务时退出码仍为 0，实际任务成败应读取 `state`；`wait` 返回任务对应的退出码。
@@ -168,7 +170,7 @@ CLI 默认使用普通同步；即使 Profile 中保存的默认模式为镜像�
 | 2 / 3 / 4 | 参数或配置错误 / 当前忙碌 / 本地运行条件或访问错误 |
 | 5 / 6 / 7 / 8 | SSH 信任或认证失败 / rsync 失败 / 任务已取消 / 执行中断或需要恢复 |
 | 124 | 等待超时，后台任务继续 |
-| 130 / 143 | 等待被中断或终止，后台任务继续 |
+| 129 / 130 / 143 | 客户端收到 HUP / INT / TERM；提交是否完成及后台任务状态见返回结果 |
 
 任务记录及脱敏日志保存在 `~/.local/share/nju-hpc-sync/tasks/`，沿用日志保留天数；活动任务不会被清理。执行进程异常退出时，结果可能不确定；存在残留传输进程时返回 `RECOVERY_REQUIRED` 并阻止新同步。操作系统重启后不会自动重跑任务，也不会自动重试失败的镜像。普通终端关闭不会影响任务，但系统关机、注销时强制清理所有用户进程等操作仍可能中断传输。
 

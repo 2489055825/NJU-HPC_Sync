@@ -12,12 +12,13 @@ import sys
 from collections import deque
 from dataclasses import asdict
 from pathlib import Path
+from typing import Callable
 
 from .credential_store import CredentialStore
 from .auth import validate_automatic_credential
 from .database import Database, ProfileDataError
 from .models import Direction, SyncMode, SyncRequest
-from .runtime import CliError, data_root
+from .runtime import CliError, ClientInterrupted, data_root
 from .ssh_config import read_ssh_hosts
 from .tasks import cancel_task, get_task, submit_task, wait_task
 
@@ -27,10 +28,30 @@ class Parser(argparse.ArgumentParser):
         raise CliError("INVALID_ARGUMENTS", message)
 
 
-class WaitInterrupted(Exception):
-    def __init__(self, signum, task_id):
-        self.signum = signum
-        self.task_id = task_id
+class _ClientSignals:
+    def __init__(self) -> None:
+        self.signum: int | None = None
+        self.task_id: str | None = None
+        self.handlers: dict[int, object] = {}
+
+    def _request(self, signum: int, _frame) -> None:
+        # Do not acquire locks or raise into Popen/task-record writes.
+        if self.signum is None:
+            self.signum = signum
+
+    def install(self) -> None:
+        for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            self.handlers[signum] = signal.signal(signum, self._request)
+
+    def restore(self) -> None:
+        for signum, handler in self.handlers.items():
+            signal.signal(signum, handler)
+
+    def check(self, task_id: str | None = None) -> None:
+        if task_id is not None:
+            self.task_id = task_id
+        if self.signum is not None:
+            raise ClientInterrupted(self.signum, self.task_id)
 
 
 def _seconds(value: str) -> float:
@@ -125,13 +146,14 @@ def _request(args) -> tuple[SyncRequest, str, str]:
     return request, credential_name, profile.name if profile else ""
 
 
-def _wait(task_id: str | None, timeout: float | None) -> dict:
+def _wait(task_id: str | None, timeout: float | None,
+          interrupt_check: Callable[[str | None], None] | None = None) -> dict:
+    if interrupt_check is not None:
+        interrupt_check(task_id)
     selected = get_task(task_id)
     task_id = selected["task_id"]
-    handlers = {}
-
-    def interrupt(signum, _frame):
-        raise WaitInterrupted(signum, task_id)
+    if interrupt_check is not None:
+        interrupt_check(task_id)
 
     last = None
 
@@ -147,16 +169,10 @@ def _wait(task_id: str | None, timeout: float | None) -> dict:
             last = value
 
     try:
-        for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-            handlers[signum] = signal.signal(signum, interrupt)
-        try:
-            print(f"task_id={task_id}", file=sys.stderr, flush=True)
-        except OSError:
-            pass
-        return wait_task(task_id, timeout, on_progress=progress)
-    finally:
-        for signum, handler in handlers.items():
-            signal.signal(signum, handler)
+        print(f"task_id={task_id}", file=sys.stderr, flush=True)
+    except OSError:
+        pass
+    return wait_task(task_id, timeout, on_progress=progress, interrupt_check=interrupt_check)
 
 
 def _queries(args) -> dict:
@@ -220,16 +236,16 @@ def _doctor() -> dict:
     return {"ready": all(check["ok"] for check in checks), "checks": checks, "warnings": warnings}
 
 
-def _execute(args) -> tuple[dict, int]:
+def _execute(args, interrupt_check: Callable[[str | None], None] | None = None) -> tuple[dict, int]:
     if args.command in {"sync", "preview"}:
         request, credential_name, profile_name = _request(args)
-        record = submit_task(request, credential_name, profile_name)
+        record = submit_task(request, credential_name, profile_name, interrupt_check=interrupt_check)
         if args.detach:
             return record, 0
-        record = _wait(record["task_id"], args.wait_timeout)
+        record = _wait(record["task_id"], args.wait_timeout, interrupt_check)
         return record, record.get("cli_exit_code", 8)
     if args.command == "wait":
-        record = _wait(args.task_id, args.timeout)
+        record = _wait(args.task_id, args.timeout, interrupt_check)
         return record, record.get("cli_exit_code", 8)
     if args.command == "status":
         return get_task(args.task_id), 0
@@ -271,33 +287,64 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     json_mode = "--json" in argv
     command = next((value for value in argv if not value.startswith("-")), "")
+    interrupts = _ClientSignals()
     try:
-        args = parser().parse_args(argv)
-        command = args.command
-        result, exit_code = _execute(args)
-    except WaitInterrupted as exc:
-        exit_code = 128 + exc.signum
-        result = {**get_task(exc.task_id), "error": {"code": "WAIT_INTERRUPTED",
-                  "message": "已结束等待；后台任务继续。停止传输请使用 cancel。"}}
-    except CliError as exc:
-        exit_code = exc.exit_code
-        details = dict(exc.details)
-        result = {"accepted": False, **details.pop("task", {}), **details,
-                  "error": {"code": exc.code, "message": str(exc),
-                            "next_action": "根据错误检查参数或配置；已有任务请先查询状态。"}}
-    except (ValueError, RuntimeError) as exc:
-        exit_code = 2
-        result = {"accepted": False, "error": {"code": "CONFIG_INVALID", "message": "参数或已有配置无效，请检查配置。"}}
-    except (OSError, sqlite3.Error):
-        exit_code = 4
-        result = {"accepted": False, "error": {"code": "LOCAL_IO_FAILED", "message": "无法访问本地依赖或数据，请检查权限和存储。"}}
-    result = {"schema_version": 1, "command": command, **result}
+        try:
+            args = parser().parse_args(argv)
+            command = args.command
+            if command in {"sync", "preview", "wait"}:
+                interrupts.install()
+                interrupts.check()
+            result, exit_code = _execute(args, interrupts.check)
+        except ClientInterrupted:
+            result, exit_code = {}, 0  # Report below, with handlers still installed.
+        except CliError as exc:
+            exit_code = exc.exit_code
+            details = dict(exc.details)
+            result = {"accepted": False, **details.pop("task", {}), **details,
+                      "error": {"code": exc.code, "message": str(exc),
+                                "next_action": "根据错误检查参数或配置；已有任务请先查询状态。"}}
+        except (ValueError, RuntimeError):
+            exit_code = 2
+            result = {"accepted": False, "error": {"code": "CONFIG_INVALID", "message": "参数或已有配置无效，请检查配置。"}}
+        except (OSError, sqlite3.Error):
+            exit_code = 4
+            result = {"accepted": False, "error": {"code": "LOCAL_IO_FAILED", "message": "无法访问本地依赖或数据，请检查权限和存储。"}}
+        if interrupts.signum is not None:
+            result = _interrupted_result(interrupts.task_id, command)
+            exit_code = 128 + interrupts.signum
+        result = {"schema_version": 1, "command": command, **result}
+        try:
+            _emit(result, json_mode)
+        except (BrokenPipeError, OSError):
+            # Output consumers may disappear; they never own the background task.
+            pass
+        return exit_code
+    finally:
+        interrupts.restore()
+
+
+def _interrupted_result(task_id: str | None, command: str) -> dict:
+    if task_id is None:
+        if command == "wait":
+            return {"error": {"code": "WAIT_INTERRUPTED", "message": "已结束等待，尚未选定任务；后台任务不受影响。"}}
+        return {"accepted": False, "error": {"code": "SUBMIT_INTERRUPTED", "message": "提交已中断，未创建后台任务。"}}
     try:
-        _emit(result, json_mode)
-    except (BrokenPipeError, OSError):
-        # Output consumers may disappear; they never own the background task.
-        pass
-    return exit_code
+        record = get_task(task_id)
+    except (CliError, OSError, ValueError, RuntimeError):
+        record = {"task_id": task_id, "state": "unknown", "accepted": None,
+                  "terminal": False, "transfer_success": None}
+        message = "已结束等待；暂时无法确认该任务是否存在及其状态。请先使用 status 查询，不要直接重复提交。"
+    else:
+        if (record.get("error") or {}).get("code") == "SUBMIT_INTERRUPTED":
+            return {**record, "error": {"code": "SUBMIT_INTERRUPTED", "message": "提交已中断；任务记录已保留，未启动后台进程或传输。"}}
+        if record["terminal"]:
+            message = "已结束等待；该任务已结束，请查看任务状态和结果。"
+        elif not record["accepted"]:
+            message = "已结束等待；后台接管尚未确认，请使用 status 查询。停止任务请使用 cancel。"
+        else:
+            message = "已结束等待；后台任务继续。停止传输请使用 cancel。"
+    return {**record, "error": {"code": "WAIT_INTERRUPTED", "message": message}}
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -16,10 +17,10 @@ from typing import Callable
 from .credential_store import CredentialStore
 from .auth import validate_automatic_credential
 from .database import Database
-from .models import SyncRequest
+from .models import SyncRequest, utc_now
 from .paths import normalize_directory_path, normalize_local_path
 from .rsync_command import preflight
-from .runtime import (BusyError, CliError, TaskStore, TransferLease,
+from .runtime import (BusyError, CliError, ClientInterrupted, TaskStore, TransferLease,
                       process_matches, session_alive, stop_session)
 
 
@@ -68,14 +69,22 @@ def _worker_command(task_id: str, lease_fd: int, ready_fd: int) -> list[str]:
     return [sys.executable, "-m", "app.worker", *args]
 
 
-def submit_task(request: SyncRequest, credential_name: str, profile_name: str = "") -> dict:
+def submit_task(request: SyncRequest, credential_name: str, profile_name: str = "", *,
+                interrupt_check: Callable[[str | None], None] | None = None) -> dict:
+    def checkpoint(task_id: str | None = None) -> None:
+        if interrupt_check is not None:
+            interrupt_check(task_id)
+
+    checkpoint()
     request = SyncRequest(normalize_directory_path(str(Path(normalize_local_path(request.local_path)).absolute())),
                           request.remote_host, normalize_directory_path(request.remote_path),
                           request.direction, request.mode, request.dry_run)
     check = preflight(request)
+    checkpoint()
     if not check.ok:
         raise CliError("PREFLIGHT_FAILED", check.message, 4)
     credential = CredentialStore().load().get(credential_name)
+    checkpoint()
     if credential is None or not credential.static_password or not credential.totp_secret:
         raise CliError("CREDENTIAL_INVALID", "请选择已有且包含固定密码和 TOTP 密钥的凭据。")
     try:
@@ -94,11 +103,26 @@ def submit_task(request: SyncRequest, credential_name: str, profile_name: str = 
     child = None
     record = None
     try:
+        checkpoint()
         _recover_and_cleanup(store)
-        record = store.create(asdict(request), credential_name, profile_name)
-        task_id = record["task_id"]
+        checkpoint()
+        # Keep the ID even if atomic publication succeeds but its fsync fails.
+        task_id = uuid.uuid4().hex
+        try:
+            record = store.create(asdict(request), credential_name, profile_name, task_id=task_id)
+        except OSError:
+            try:
+                record = store.read(task_id)
+            except (CliError, OSError):
+                pass
+            checkpoint(task_id)
+            raise
+        checkpoint(task_id)
         lease.set_owner({"owner": "cli", "task_id": task_id})
         read_fd, write_fd = os.pipe()
+        checkpoint(task_id)
+        # A flag-only signal handler lets Popen finish assigning ownership.
+        # Never unwind the call between starting a worker and receiving its PID.
         child = subprocess.Popen(
             _worker_command(task_id, lease.fd, write_fd),
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -109,11 +133,18 @@ def submit_task(request: SyncRequest, credential_name: str, profile_name: str = 
         threading.Thread(target=child.wait, daemon=True).start()
         os.close(write_fd)
         write_fd = None
-        if select.select([read_fd], [], [], 15)[0]:
-            acknowledged = os.read(read_fd, 64).startswith(b"ready")
-        else:
-            acknowledged = False
+        acknowledged = False
+        deadline = time.monotonic() + 15
+        while True:
+            checkpoint(task_id)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if select.select([read_fd], [], [], min(.1, remaining))[0]:
+                acknowledged = os.read(read_fd, 64).startswith(b"ready")
+                break
         current = store.read(task_id)
+        checkpoint(task_id)
         if not acknowledged and not current.get("accepted"):
             if current["terminal"]:
                 error = current.get("error") or {}
@@ -121,6 +152,12 @@ def submit_task(request: SyncRequest, credential_name: str, profile_name: str = 
                                current.get("cli_exit_code", 8), task_id=task_id, task=current)
             raise CliError("START_UNCERTAIN", "后台任务启动未确认，请查询任务后再决定是否重试。", 8, task_id=task_id)
         return _observe(current)
+    except ClientInterrupted:
+        if record is not None and child is None:
+            store.update(record["task_id"], state="cancelled", terminal=True, accepted=False,
+                         transfer_success=False, cli_exit_code=7, rsync_exit_code=None, end_time=utc_now(),
+                         error={"code": "SUBMIT_INTERRUPTED", "message": "提交已中断，未启动后台进程或传输。"})
+        raise
     except Exception:
         if record is not None and child is None:
             store.update(record["task_id"], state="failed", terminal=True, accepted=False,
@@ -134,11 +171,14 @@ def submit_task(request: SyncRequest, credential_name: str, profile_name: str = 
 
 
 def wait_task(task_id: str | None = None, timeout: float | None = None,
-              on_progress: Callable[[dict], None] | None = None) -> dict:
+              on_progress: Callable[[dict], None] | None = None, *,
+              interrupt_check: Callable[[str | None], None] | None = None) -> dict:
     selected = get_task(task_id)
     task_id = selected["task_id"]
     deadline = time.monotonic() + timeout if timeout is not None else None
     while True:
+        if interrupt_check is not None:
+            interrupt_check(task_id)
         record = get_task(task_id)
         if record["terminal"] or record["state"] == "interrupted":
             return record

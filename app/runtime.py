@@ -27,6 +27,12 @@ class CliError(Exception):
         self.details = details
 
 
+class ClientInterrupted(Exception):
+    def __init__(self, signum: int, task_id: str | None = None):
+        self.signum = signum
+        self.task_id = task_id
+
+
 class BusyError(CliError):
     def __init__(self, owner: dict):
         super().__init__("BUSY", "当前已有同步任务，未提交新任务。", 3, owner=owner)
@@ -277,8 +283,8 @@ class TaskStore:
             raise CliError("TASK_NOT_FOUND", "任务编号无效。")
         return self.root / "tasks" / task_id
 
-    def create(self, request: dict, credential_name: str, profile_name: str) -> dict:
-        task_id = uuid.uuid4().hex
+    def create(self, request: dict, credential_name: str, profile_name: str, *, task_id: str | None = None) -> dict:
+        task_id = task_id or uuid.uuid4().hex
         record = {"schema_version": 1, "task_id": task_id, "state": "starting",
                   "terminal": False, "accepted": False, "transfer_success": None,
                   "request": request, "credential_name": credential_name,

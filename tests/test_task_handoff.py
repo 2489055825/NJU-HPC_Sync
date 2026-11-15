@@ -2,9 +2,11 @@
 import ctypes
 import json
 import os
+import signal
 import subprocess
 import sys
 
+import pexpect
 import pytest
 
 from tests.cli_helpers import configure_home, pump
@@ -146,6 +148,70 @@ raise SystemExit(main(['sync', '--local', str(Path.home() / 'local'), '--host', 
         if client.poll() is None:
             client.kill()
         client.communicate(timeout=3)
+        if task_id:
+            stop_session(store.read(task_id).get("child_process"))
+        if identity:
+            stop_session(identity)
+
+
+@pytest.mark.parametrize("signum,terminal,command,detach", [
+    (signal.SIGINT, False, "sync", False), (signal.SIGTERM, False, "sync", False),
+    (signal.SIGHUP, False, "sync", False), (signal.SIGINT, True, "sync", False),
+    (signal.SIGINT, False, "preview", False), (signal.SIGINT, False, "sync", True),
+])
+def test_signal_during_startup_acknowledgement_returns_task_and_preserves_worker(
+        tmp_path, monkeypatch, signum, terminal, command, detach):
+    from app.runtime import TaskStore, process_matches, stop_session
+    from app.tasks import wait_task
+
+    env = configure_home(tmp_path, monkeypatch)
+    arguments = [command, "--profile", "project", "--json"] + (["--detach"] if detach else [])
+    client_code = f'''import sys
+from app import tasks
+from app.cli import main
+tasks._worker_command = lambda task_id,lease_fd,ready_fd: [
+    sys.executable,'-c',{WRAPPER!r},'before_entry','',task_id,str(lease_fd),str(ready_fd)]
+raise SystemExit(main({arguments!r}))
+'''
+    if terminal:
+        client = pexpect.spawn(sys.executable, ["-c", client_code], env=env,
+                               encoding="utf-8", echo=False, timeout=3)
+    else:
+        client = subprocess.Popen([sys.executable, "-c", client_code], env=env,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    store = TaskStore()
+    identity = None
+    task_id = None
+    try:
+        marker = tmp_path / "gated-worker.json"
+        identity = pump(lambda: json.loads(marker.read_text()) if marker.exists() else None)
+        task_id = store.records()[0]["task_id"]
+        if terminal:
+            client.sendcontrol("c")
+            client.expect(pexpect.EOF)
+            stdout, stderr = client.before, ""
+            client.close()
+            assert client.exitstatus == 130, stdout
+        else:
+            client.send_signal(signum)
+            stdout, stderr = client.communicate(timeout=3)
+            assert client.returncode == 128 + signum, stderr + stdout
+        result = json.loads(stdout)
+        assert result["task_id"] == task_id and result["state"] == "starting"
+        assert result["terminal"] is False and result["accepted"] is False
+        assert result["error"]["code"] == "WAIT_INTERRUPTED"
+        assert "Traceback" not in stderr
+        assert process_matches(identity)
+        (tmp_path / "release-worker").touch()
+        final = wait_task(task_id, timeout=6)
+        assert final["state"] == "succeeded" and final["transfer_success"]
+        assert len((tmp_path / "bin/invocations.jsonl").read_text().splitlines()) == 1
+    finally:
+        if terminal:
+            client.close(force=True)
+        elif client.poll() is None:
+            client.kill()
+            client.communicate(timeout=3)
         if task_id:
             stop_session(store.read(task_id).get("child_process"))
         if identity:

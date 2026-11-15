@@ -178,6 +178,155 @@ def test_terminated_cli_waiter_does_not_cancel_worker(tmp_path):
             client.communicate()
 
 
+@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM, signal.SIGHUP])
+@pytest.mark.parametrize("stage", ["before_record", "record_created", "worker_spawned", "unreadable_record"])
+def test_submission_signal_returns_json_and_preserves_ownership(tmp_path, stage, signum):
+    env = configure_home(tmp_path)
+    script = f'''import os,signal,sys
+from app import cli,tasks
+from app.runtime import CliError
+stage, signum = {stage!r}, {int(signum)}
+original_handlers = {{s:signal.getsignal(s) for s in (signal.SIGINT,signal.SIGTERM,signal.SIGHUP)}}
+if stage == 'before_record':
+    original = cli._request
+    def request(*args, **kwargs):
+        value = original(*args, **kwargs)
+        os.kill(os.getpid(),signum)
+        return value
+    cli._request = request
+elif stage == 'record_created':
+    original = tasks.TaskStore.create
+    def create(*args, **kwargs):
+        value = original(*args, **kwargs)
+        os.kill(os.getpid(),signum)
+        return value
+    tasks.TaskStore.create = create
+else:
+    original = tasks.subprocess.Popen
+    def spawn(*args, **kwargs):
+        value = original(*args, **kwargs)
+        os.kill(os.getpid(),signum)
+        return value
+    tasks.subprocess.Popen = spawn
+    if stage == 'unreadable_record':
+        def unreadable(*args, **kwargs):
+            raise CliError('RECORD_INVALID','Synthetic record read failure',8)
+        cli.get_task = unreadable
+code = cli.main(['sync','--profile','project','--json'])
+assert all(signal.getsignal(s) == handler for s,handler in original_handlers.items())
+raise SystemExit(code)
+'''
+    client = subprocess.run([sys.executable, "-c", script], env=env, cwd=ROOT,
+                            capture_output=True, text=True, timeout=5)
+    assert client.returncode == 128 + signum, client.stderr + client.stdout
+    result = json.loads(client.stdout)
+    assert "Traceback" not in client.stderr
+    if stage == "before_record":
+        assert result["accepted"] is False
+        assert "task_id" not in result
+        assert result["error"]["code"] == "SUBMIT_INTERRUPTED"
+        assert not (tmp_path / ".local/share/nju-hpc-sync/tasks").exists()
+    else:
+        assert result["task_id"]
+        task_id = result["task_id"]
+        if stage == "record_created":
+            assert result["state"] == "cancelled" and result["terminal"]
+            assert result["accepted"] is False
+            assert result["error"]["code"] == "SUBMIT_INTERRUPTED"
+            assert not (tmp_path / "bin/invocations.jsonl").exists()
+        else:
+            final = cli(env, "wait", task_id, "--timeout", "5", "--json")
+            assert final.returncode == 0, final.stdout + final.stderr
+            assert json.loads(final.stdout)["state"] == "succeeded"
+            assert len((tmp_path / "bin/invocations.jsonl").read_text().splitlines()) == 1
+            if stage == "unreadable_record":
+                assert result["state"] == "unknown"
+                assert result["transfer_success"] is None
+
+
+def test_second_signal_during_interruption_reporting_does_not_break_json(tmp_path):
+    env = configure_home(tmp_path)
+    script = '''import os,signal
+from app import cli,tasks
+original = tasks.subprocess.Popen
+def spawn(*args, **kwargs):
+    value = original(*args, **kwargs)
+    os.kill(os.getpid(),signal.SIGINT)
+    return value
+tasks.subprocess.Popen = spawn
+original_get = cli.get_task
+def get_task(*args, **kwargs):
+    os.kill(os.getpid(),signal.SIGTERM)
+    return original_get(*args, **kwargs)
+cli.get_task = get_task
+raise SystemExit(cli.main(['sync','--profile','project','--json']))
+'''
+    client = subprocess.run([sys.executable, "-c", script], env=env, cwd=ROOT,
+                            capture_output=True, text=True, timeout=5)
+    assert client.returncode == 130, client.stderr + client.stdout
+    result = json.loads(client.stdout)
+    assert "Traceback" not in client.stderr
+    assert cli(env, "wait", result["task_id"], "--timeout", "5", "--json").returncode == 0
+
+
+@pytest.mark.parametrize("exists", [True, False])
+def test_interrupted_wait_retains_explicit_id_when_initial_read_fails(tmp_path, exists):
+    env = configure_home(tmp_path)
+    submitted = json.loads(cli(env, "sync", "--profile", "project", "--detach", "--json").stdout)
+    task_id = submitted["task_id"] if exists else "missing"
+    script = f'''import os,signal
+from app import cli
+from app.runtime import CliError
+def unreadable(*args, **kwargs):
+    os.kill(os.getpid(),signal.SIGINT)
+    raise CliError('RECORD_INVALID','Synthetic record read failure',8)
+cli.get_task = unreadable
+raise SystemExit(cli.main(['wait',{task_id!r},'--json']))
+'''
+    client = subprocess.run([sys.executable, "-c", script], env=env, cwd=ROOT,
+                            capture_output=True, text=True, timeout=5)
+    assert client.returncode == 130, client.stdout + client.stderr
+    result = json.loads(client.stdout)
+    assert result["task_id"] == task_id
+    assert result["state"] == "unknown"
+    assert "任务已创建" not in result["error"]["message"]
+    assert "Traceback" not in client.stderr
+    assert cli(env, "wait", submitted["task_id"], "--timeout", "5", "--json").returncode == 0
+
+
+def test_signal_and_post_publication_io_failure_keep_task_id(tmp_path):
+    env = configure_home(tmp_path)
+    script = '''import os,signal,stat
+from pathlib import Path
+from app import cli,runtime
+replace, fsync = runtime.os.replace, runtime.os.fsync
+published = [False]
+def publish(source,destination):
+    replace(source,destination)
+    if Path(destination).name == 'task.json' and not published[0]:
+        published[0] = True
+        os.kill(os.getpid(),signal.SIGINT)
+def fail_sync(fd):
+    if published[0] and stat.S_ISDIR(os.fstat(fd).st_mode):
+        raise OSError('Synthetic post-publication sync failure')
+    fsync(fd)
+runtime.os.replace = publish
+runtime.os.fsync = fail_sync
+raise SystemExit(cli.main(['sync','--profile','project','--json']))
+'''
+    client = subprocess.run([sys.executable, "-c", script], env=env, cwd=ROOT,
+                            capture_output=True, text=True, timeout=5)
+    assert client.returncode == 130, client.stdout + client.stderr
+    result = json.loads(client.stdout)
+    task_path = next((tmp_path / ".local/share/nju-hpc-sync/tasks").glob("*/task.json"))
+    stored = json.loads(task_path.read_text())
+    assert result["task_id"] == stored["task_id"]
+    assert result["state"] == stored["state"] == "cancelled"
+    assert result["accepted"] is False and result["terminal"]
+    assert not (tmp_path / "bin/invocations.jsonl").exists()
+    assert "Traceback" not in client.stderr
+
+
 def test_readonly_database_preserves_existing_bytes(tmp_path):
     from app.database import Database
     from app.models import Profile

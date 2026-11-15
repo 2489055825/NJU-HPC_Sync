@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import re
 import threading
+from dataclasses import dataclass
 from typing import Callable, Protocol
 
 from .models import Credential
@@ -10,6 +11,10 @@ from .totp import TotpCancelled, TotpConfig, TotpReplayGuard, TotpSession, gener
 
 class AuthenticationCancelled(Exception):
     """Raised when the user closes or cancels a password prompt."""
+
+
+def is_key_passphrase_prompt(prompt: str) -> bool:
+    return re.search(r"(?i)\bpassphrase(?:\s+for\s+key\b|\s*[:：])", prompt) is not None
 
 
 def validate_automatic_credential(credential: Credential) -> None:
@@ -56,7 +61,9 @@ class AutoAuthProvider:
         )
         self._prompt_count = 0
 
-    def __call__(self, _prompt: str) -> str:
+    def __call__(self, prompt: str) -> str:
+        if is_key_passphrase_prompt(prompt):
+            raise RuntimeError("KEY_PASSPHRASE_REQUIRED: 请先使用 ssh-add 解锁 SSH 私钥，再重新提交任务。")
         # TotpSession blocks only at the instant SSH asks for a password, so the
         # code has the longest possible validity window and is never cached.
         self._prompt_count += 1

@@ -89,3 +89,29 @@ def test_standard_encrypted_key_passphrase_prompt_and_password_retry():
     assert result.status is RunStatus.SUCCESS
     assert len(prompts) == 3
     assert "Enter passphrase for key" in prompts[0]
+
+
+@pytest.mark.parametrize("keyword", ["password", "passphrase", "verification code", "otp"])
+def test_path_diagnostics_are_never_authentication_prompts(keyword):
+    diagnostic = f'rsync: [sender] change_dir "/missing/{keyword}:archive" failed: No such file or directory (2)'
+    script = f"import sys; print({diagnostic!r},flush=True); sys.exit(23)"
+    prompts = []
+    result = RsyncRunner().run([sys.executable, "-c", script], RunnerCallbacks(
+        on_prompt=lambda prompt: prompts.append(prompt)), authentication_timeout=1)
+    assert prompts == []
+    assert result.status is RunStatus.FAILED and result.exit_code == 23
+    assert "No such file or directory" in result.output
+
+
+@pytest.mark.parametrize("prompt", ["Password: ", "user@host's password: ",
+                                     "(user@host) Password: ", "Verification code: ", "OTP: "])
+def test_fragmented_standard_authentication_prompts_are_recognized(prompt):
+    cut = len(prompt) // 2
+    script = (f"import sys,time; print({prompt[:cut]!r},end='',flush=True); time.sleep(.3); "
+              f"print({prompt[cut:]!r},end='',flush=True); "
+              "sys.exit(0 if sys.stdin.readline().strip()=='synthetic-response' else 2)")
+    prompts = []
+    result = RsyncRunner().run([sys.executable, "-c", script], RunnerCallbacks(
+        on_prompt=lambda value: prompts.append(value) or "synthetic-response"), authentication_timeout=1)
+    assert result.status is RunStatus.SUCCESS
+    assert len(prompts) == 1

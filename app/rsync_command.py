@@ -4,6 +4,7 @@ import os
 import shlex
 import shutil
 from dataclasses import dataclass
+from pathlib import Path
 
 from .models import Direction, SyncMode, SyncRequest
 from .paths import local_destination_path, local_source_path, normalize_local_path, validate_remote_host, validate_remote_path
@@ -40,7 +41,7 @@ def build_command(request: SyncRequest) -> list[str]:
     # Normalize before encoding: appending a slash outside shell quotes would
     # change the encoded argument rather than the user's directory path.
     remote = f"{host}:{remote_path}"
-    local = normalize_local_path(request.local_path)
+    local = str(Path(normalize_local_path(request.local_path)).absolute())
     if request.direction is Direction.UPLOAD:
         source, destination = local_source_path(local), remote
     else:

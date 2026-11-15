@@ -2,6 +2,8 @@ import os
 import time
 from pathlib import Path
 
+import pytest
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
@@ -29,6 +31,72 @@ def test_final_status_clears_current_file(tmp_path):
     assert window.statusBar().currentMessage() == ""
     window.close()
     app.processEvents()
+
+
+@pytest.mark.parametrize("failure_point", ["add_history", "cleanup_history"])
+def test_history_failure_keeps_successful_mirror_preview_usable(tmp_path, monkeypatch, failure_point):
+    import sqlite3
+    from app.models import RunResult
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".ssh").mkdir()
+    (tmp_path / ".ssh/config").write_text("Host example\n")
+    window = MainWindow(Database(tmp_path / "app.sqlite3"), CredentialStore(tmp_path / "credentials.json"))
+    window.local.setText(str(tmp_path))
+    window.remote.setText("/remote")
+    window.host_selector.set_host("example")
+    window.mirror.setChecked(True)
+    request = window._request(True)
+    window._current_request = request
+    window._pending_mirror = True
+    output = "Number of deleted files: 2\n"
+    result = RunResult(RunStatus.SUCCESS, 0, output, "", "", .1, [])
+
+    def fail(*args):
+        raise sqlite3.OperationalError("synthetic database failure")
+    monkeypatch.setattr(window.db, failure_point, fail)
+    try:
+        window._worker_finished(result)
+        assert window.status_label.text() == RunStatus.SUCCESS.value
+        assert window._preview_request == request
+        assert window._preview_output == output
+        assert window._start_after_cleanup
+        assert "历史" in window.statusBar().currentMessage()
+        assert "历史" in window.log.toPlainText()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_credential_rename_from_management_updates_gui_and_cli_profile(tmp_path, monkeypatch):
+    from app.cli import _request, parser
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".ssh").mkdir()
+    (tmp_path / ".ssh/config").write_text("Host example\n")
+    store = CredentialStore()
+    store.save({"original": Credential("original", "static", "JBSWY3DPEHPK3PXP")})
+    db = Database()
+    profile = db.save_profile(Profile("project", str(tmp_path), "example", "/remote", "original"))
+    window = MainWindow(db, store)
+
+    def rename_and_close(dialog):
+        dialog.name.setText("renamed")
+        dialog._save()
+        return 0
+
+    monkeypatch.setattr(CredentialsDialog, "exec", rename_and_close)
+    try:
+        window._open_credentials()
+        assert window.credential.currentData() == "renamed"
+        assert window.db.get_profile(profile.id).credential_name == "renamed"
+        _sync, credential_name, _profile = _request(parser().parse_args(["sync", "--profile", "project"]))
+        assert credential_name == "renamed"
+    finally:
+        window.close()
+        app.processEvents()
 
 
 def test_invalid_profile_row_does_not_crash_gui_or_change_database(tmp_path):

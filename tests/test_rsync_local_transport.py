@@ -262,3 +262,61 @@ def test_prompt_like_filenames_return_success_after_real_transfer(tmp_path, pack
     assert result["summary"]["transferred_files"] == 4
     for name in names:
         assert (remote / name).read_text() == "ordinary file contents\n"
+
+
+@pytest.mark.parametrize("direction", ["upload", "download"])
+def test_gui_command_keeps_relative_colon_local_directory_literal(tmp_path, monkeypatch, direction):
+    from app.models import Direction, SyncRequest
+    from app.rsync_command import build_command, preflight
+
+    env = configure_real_transport(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    local, remote = tmp_path / "data:local", tmp_path / "remote"
+    local.mkdir()
+    remote.mkdir()
+    source, destination = (local, remote) if direction == "upload" else (remote, local)
+    (source / "payload.txt").write_text("literal local directory\n")
+    request = SyncRequest("data:local", "example", str(remote), Direction(direction))
+    assert preflight(request).ok
+    result = subprocess.run(build_command(request), env=env, capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0, result.stderr
+    assert (destination / "payload.txt").read_text() == "literal local directory\n"
+
+
+def test_absolute_local_operand_preserves_symlink_parent_traversal(tmp_path, monkeypatch):
+    from app.models import SyncMode, SyncRequest
+    from app.rsync_command import build_command
+
+    env = configure_real_transport(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "real/child").mkdir(parents=True)
+    source = tmp_path / "real/source"
+    source.mkdir()
+    (source / "correct.txt").write_text("correct source\n")
+    (tmp_path / "link").symlink_to(tmp_path / "real/child", target_is_directory=True)
+    decoy = tmp_path / "source"
+    decoy.mkdir()
+    (decoy / "wrong.txt").write_text("wrong source\n")
+    destination = tmp_path / "remote"
+    request = SyncRequest("link/../source", "example", str(destination), mode=SyncMode.MIRROR)
+    result = subprocess.run(build_command(request), env=env, capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0, result.stderr
+    assert (destination / "correct.txt").exists()
+    assert not (destination / "wrong.txt").exists()
+
+
+def test_real_missing_remote_path_diagnostic_does_not_request_password(tmp_path, monkeypatch):
+    from app.models import Direction, RunStatus, SyncRequest
+    from app.rsync_command import build_command
+    from app.rsync_runner import RsyncRunner, RunnerCallbacks
+
+    env = configure_real_transport(tmp_path)
+    monkeypatch.setenv("HOME", env["HOME"])
+    monkeypatch.setenv("PATH", env["PATH"])
+    request = SyncRequest(str(tmp_path / "local"), "example", str(tmp_path / "password:missing"), Direction.DOWNLOAD)
+    prompts = []
+    result = RsyncRunner().run(build_command(request), RunnerCallbacks(
+        on_prompt=lambda value: prompts.append(value)), authentication_timeout=1)
+    assert prompts == []
+    assert result.status is RunStatus.FAILED
+    assert "cd" in result.output

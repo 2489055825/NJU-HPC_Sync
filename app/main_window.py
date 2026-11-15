@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .auth import AuthenticationCancelled, AutoAuthProvider
+from .auth import AuthenticationCancelled, AutoAuthProvider, is_key_passphrase_prompt
 from .credential_store import CredentialStore
 from .database import Database, ProfileDataError
 from .dialogs import CredentialsDialog, HistoryDialog, HostConfigDialog, LogManagementDialog, PasswordDialog, ProfileDialog, UsageDialog
@@ -152,8 +152,13 @@ class SyncWorker(QObject):
             def report_status(value: RunStatus) -> None:
                 self.status.emit(RunStatus.PREVIEWING.value if self.dry_run and value in {RunStatus.CONNECTING, RunStatus.TRANSFERRING} else value.value)
 
+            def authenticate(prompt: str) -> str | None:
+                if self.auth_mode == "auto" and is_key_passphrase_prompt(prompt):
+                    return self.broker.request(prompt)
+                return provider(prompt)
+
             callbacks = RunnerCallbacks(
-                on_output=self.output.emit, on_status=report_status, on_prompt=provider,
+                on_output=self.output.emit, on_status=report_status, on_prompt=authenticate,
                 on_host_key=lambda prompt: self.host_key_broker.request(prompt) == "yes",
                 on_started=lambda pid: lease.set_owner({"owner": "gui", "child_process": process_identity(pid)}),
             )
@@ -949,8 +954,18 @@ class MainWindow(QMainWindow):
         if result.status is RunStatus.FAILED:
             self._append_log(f"{friendly_exit_message(result.exit_code)}\n")
         record = HistoryRecord(self._current_profile_name, request.local_path, request.remote_host, request.remote_path, request.direction.value, request.mode.value, request.dry_run, result.status.value, result.exit_code, result.duration, result.output, start_time=result.start_time, end_time=result.end_time)
-        self.db.add_history(record)
-        self.db.cleanup_history()
+        history_warning = ""
+        try:
+            self.db.add_history(record)
+        except (OSError, sqlite3.Error):
+            history_warning = "同步历史保存失败；本次传输结果不受影响，请保存当前日志，不要因此重复传输。"
+        else:
+            try:
+                self.db.cleanup_history()
+            except (OSError, sqlite3.Error):
+                history_warning = "同步历史已保存，但过期历史清理失败；本次传输结果不受影响。"
+        if history_warning:
+            self._append_log(f"[警告] {history_warning}\n")
         pending_mirror = self._pending_mirror
         self._pending_mirror = False
         self._invalidate_preview()
@@ -963,7 +978,10 @@ class MainWindow(QMainWindow):
         self._clear_current_file()
         self._reset_transfer_info()
         self.status_label.setText(result.status.value)
-        self.statusBar().clearMessage()
+        if history_warning:
+            self.statusBar().showMessage(history_warning, 15000)
+        else:
+            self.statusBar().clearMessage()
 
     def _thread_cleanup(self) -> None:
         if self._thread is not None:
@@ -994,16 +1012,23 @@ class MainWindow(QMainWindow):
 
     def _open_credentials(self) -> None:
         try:
-            dialog = CredentialsDialog(self.credential_store, self)
+            dialog = CredentialsDialog(self.credential_store, self, database=self.db)
         except RuntimeError as exc:
             QMessageBox.warning(self, "无法打开凭据管理", f"{exc}\n请修复 {self.credential_store.path} 后重试；原文件未修改，可继续使用手工认证。")
             return
         dialog.credentials_changed.connect(self._refresh_credentials)
+        dialog.credential_renamed.connect(self._credential_renamed)
         try:
             dialog.exec()
         finally:
             dialog.timer.stop()
             dialog.deleteLater()
+
+    def _credential_renamed(self, previous_name: str, new_name: str) -> None:
+        selected = self.credential.currentData()
+        self._refresh_credentials()
+        if selected == previous_name:
+            self.credential.setCurrentIndex(self.credential.findData(new_name))
 
     def _open_host_manager(self) -> None:
         dialog = HostConfigDialog(self)

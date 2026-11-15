@@ -69,6 +69,32 @@ def test_unknown_host_key_fails_without_interaction(tmp_path, monkeypatch):
     assert record["cli_exit_code"] == 5
 
 
+def test_encrypted_key_requires_unlocking_without_using_totp(tmp_path, monkeypatch):
+    from app.models import SyncRequest
+    from app.runtime import TaskStore, TransferLease
+    from app.totp import TotpSession
+    from app.worker import execute_task
+
+    configure_home(tmp_path, monkeypatch)
+    (tmp_path / "bin/rsync").write_text(
+        f"#!{sys.executable}\nimport sys\n"
+        "print(\"Enter passphrase for key '/tmp/synthetic-key': \", end='', flush=True)\n"
+        "sys.stdin.readline()\n", encoding="utf-8")
+
+    def never_generate(_self):
+        raise AssertionError("An encrypted key must not consume an account TOTP")
+    monkeypatch.setattr(TotpSession, "next_password", never_generate)
+    store = TaskStore()
+    record = store.create(asdict(SyncRequest(str(tmp_path / "local"), "example", "/remote")), "account", "")
+    with TransferLease.acquire({"owner": "cli", "task_id": record["task_id"]}) as lease:
+        execute_task(record["task_id"], os.dup(lease.fd), None)
+    result = store.read(record["task_id"])
+    assert result["state"] == "failed"
+    assert result["error"]["code"] == "KEY_PASSPHRASE_REQUIRED"
+    assert result["cli_exit_code"] == 5
+    assert "ssh-add" in result["error"]["next_action"]
+
+
 def test_history_write_failure_does_not_turn_success_into_retry(tmp_path, monkeypatch):
     from app.database import Database
 

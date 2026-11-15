@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import sqlite3
 from pathlib import Path
 
 from PySide6.QtCore import QTimer, Qt, Signal
@@ -25,6 +26,8 @@ from PySide6.QtWidgets import (
 )
 
 from .credential_store import CredentialStore
+from .auth import is_key_passphrase_prompt
+from .database import Database
 from .host_selector import SshHostSelector
 from .models import Credential, Direction, Profile, SyncMode, format_local_time
 from .paths import normalize_directory_path, normalize_local_path
@@ -254,12 +257,13 @@ class HostConfigDialog(QDialog):
 class PasswordDialog(QDialog):
     def __init__(self, prompt: str = "Password:", parent: QWidget | None = None):
         super().__init__(parent)
-        self.setWindowTitle("SSH 认证")
+        key_passphrase = is_key_passphrase_prompt(prompt)
+        self.setWindowTitle("SSH 私钥解锁" if key_passphrase else "SSH 认证")
         self.setModal(True)
         self.setMinimumWidth(520)
         self.password = QLineEdit()
         self.password.setEchoMode(QLineEdit.Password)
-        self.password.setPlaceholderText("固定密码 + 空格 + 当前 TOTP")
+        self.password.setPlaceholderText("请输入该 SSH 私钥的口令" if key_passphrase else "固定密码 + 空格 + 当前 TOTP")
         self.prompt_label = QLabel(prompt.strip())
         self.prompt_label.setWordWrap(True)
         self.prompt_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -269,7 +273,7 @@ class PasswordDialog(QDialog):
         self.prompt_label.setMaximumWidth(520)
         form = QFormLayout(self)
         form.addRow("认证提示", self.prompt_label)
-        form.addRow("完整密码", self.password)
+        form.addRow("私钥口令" if key_passphrase else "完整密码", self.password)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -287,13 +291,15 @@ class PasswordDialog(QDialog):
 
 class CredentialsDialog(QDialog):
     credentials_changed = Signal()
+    credential_renamed = Signal(str, str)
 
-    def __init__(self, store: CredentialStore, parent: QWidget | None = None):
+    def __init__(self, store: CredentialStore, parent: QWidget | None = None, *, database: Database | None = None):
         super().__init__(parent)
         self.setWindowTitle("凭据管理")
         self.setMinimumSize(650, 410)
         self.store = store
-        self.credentials = self.store.load()
+        self.database = database
+        self.credentials, self._snapshot = self.store.load_state()
         self._editing_name = ""
         self.list = QListWidget()
         self.list.currentItemChanged.connect(self._load_item)
@@ -438,15 +444,30 @@ class CredentialsDialog(QDialog):
                 raise ValueError("已存在同名凭据，请使用其他名称")
             generate_code(config, 0)
             candidate = dict(self.credentials)
-            if self._editing_name and self._editing_name != credential.name:
+            previous_name = self._editing_name
+            renamed = bool(previous_name and previous_name != credential.name)
+            if renamed:
                 candidate.pop(self._editing_name, None)
             candidate[credential.name] = credential
-            self.store.save(candidate)
+            warning = ""
+            if renamed and self.database is not None:
+                candidate, snapshot, warning = self.store.rename(
+                    candidate, previous_name,
+                    lambda: self.database.rename_credential(previous_name, credential.name),
+                    expected_snapshot=self._snapshot,
+                )
+            else:
+                snapshot = self.store.save(candidate, expected_snapshot=self._snapshot)
             self.credentials = candidate
+            self._snapshot = snapshot
             self._editing_name = credential.name
             self._refresh_list(credential.name)
+            if renamed:
+                self.credential_renamed.emit(previous_name, credential.name)
             self.credentials_changed.emit()
-        except (OSError, ValueError, RuntimeError) as exc:
+            if warning:
+                QMessageBox.warning(self, "旧凭据名称未清理", warning)
+        except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
             QMessageBox.warning(self, "无法保存凭据", str(exc))
 
     def _delete(self) -> None:
@@ -458,11 +479,12 @@ class CredentialsDialog(QDialog):
         candidate = dict(self.credentials)
         candidate.pop(item.text(), None)
         try:
-            self.store.save(candidate)
+            snapshot = self.store.save(candidate, expected_snapshot=self._snapshot)
         except (OSError, ValueError, RuntimeError) as exc:
             QMessageBox.warning(self, "无法删除凭据", str(exc))
             return
         self.credentials = candidate
+        self._snapshot = snapshot
         self._refresh_list()
         self.credentials_changed.emit()
 

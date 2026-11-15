@@ -61,3 +61,14 @@ def test_manual_auth_cancels_for_missing_or_empty_password(answer):
 def test_auto_auth_requires_a_selected_credential():
     with pytest.raises(ValueError, match="未找到所选凭据"):
         make_provider("auto", None, lambda _prompt: "unused")
+
+
+@pytest.mark.parametrize("prompt", ["Enter passphrase for key '/tmp/synthetic-key': ",
+                                   "Passphrase:", "(user@host) Passphrase:"])
+def test_auto_auth_never_generates_account_password_for_private_key(prompt):
+    provider = AutoAuthProvider(Credential("test", "static", "JBSWY3DPEHPK3PXP"))
+    provider.session.clock = lambda: 100.0
+    with pytest.raises(RuntimeError, match="KEY_PASSPHRASE_REQUIRED"):
+        provider(prompt)
+    assert provider.session.last_used_counter is None
+    assert provider._prompt_count == 0

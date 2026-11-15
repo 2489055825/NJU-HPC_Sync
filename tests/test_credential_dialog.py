@@ -94,3 +94,82 @@ def test_invalid_totp_secret_is_not_saved(credential_dialog):
     dialog._save()
     assert store.path.read_bytes() == before
     assert warnings
+
+
+@pytest.mark.parametrize("operation", ["save", "delete"])
+def test_stale_dialog_cannot_overwrite_another_windows_changes(credential_dialog, monkeypatch, operation):
+    app, first, store, warnings = credential_dialog
+    # Even dialogs sharing a store object need separate immutable snapshots.
+    second = CredentialsDialog(store)
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.Yes)
+    try:
+        first._new()
+        first.name.setText("C")
+        first.static_password.setText("new-fixed")
+        first.totp_secret.setText("JBSWY3DPEHPK3PXP")
+        first._save()
+        committed = store.path.read_bytes()
+        if operation == "save":
+            second.static_password.setText("draft-fixed")
+            second._save()
+            assert second.static_password.text() == "draft-fixed"
+        else:
+            second._delete()
+        assert store.path.read_bytes() == committed
+        assert set(store.load()) == {"A", "B", "C"}
+        assert warnings and "变化" in warnings[-1]
+    finally:
+        second.done(0)
+        app.processEvents()
+
+
+@pytest.mark.parametrize("failure", [None, "database", "alias_cleanup", "database_and_rollback"])
+def test_rename_preserves_profile_references_across_write_failures(credential_dialog, tmp_path, monkeypatch, failure):
+    import sqlite3
+
+    from app.database import Database
+    from app.models import Profile
+
+    app, _first, store, warnings = credential_dialog
+    with Database(tmp_path / "profiles.sqlite3") as db:
+        for name, credential_name in (("p1", "A"), ("p2", "A"), ("other", "B")):
+            db.save_profile(Profile(name, "/tmp/local", "example", "/remote", credential_name))
+        dialog = CredentialsDialog(store, database=db)
+        original = store.path.read_bytes()
+        dialog.name.setText("renamed")
+        if failure in {"database", "database_and_rollback"}:
+            def fail_rename(*args):
+                raise sqlite3.OperationalError("synthetic database locked")
+            monkeypatch.setattr(db, "rename_credential", fail_rename)
+        if failure in {"alias_cleanup", "database_and_rollback"}:
+            replace = os.replace
+            calls = []
+
+            def fail_cleanup(source, destination):
+                calls.append(True)
+                if len(calls) == 2:
+                    raise OSError("synthetic cleanup failed")
+                replace(source, destination)
+            monkeypatch.setattr("app.credential_store.os.replace", fail_cleanup)
+        try:
+            dialog._save()
+            saved = store.load()
+            profiles = {profile.name: profile.credential_name for profile in db.list_profiles()}
+            assert all(name in saved for name in profiles.values())
+            assert profiles["other"] == "B"
+            if failure in {"database", "database_and_rollback"}:
+                assert profiles["p1"] == profiles["p2"] == "A"
+                if failure == "database":
+                    assert store.path.read_bytes() == original
+                else:
+                    assert set(saved) == {"A", "B", "renamed"}
+                assert dialog.name.text() == "renamed"
+                assert warnings
+            else:
+                assert profiles["p1"] == profiles["p2"] == "renamed"
+                assert saved == dialog.credentials
+                assert ("A" in saved) is (failure == "alias_cleanup")
+                assert bool(warnings) is (failure == "alias_cleanup")
+        finally:
+            dialog.done(0)
+            app.processEvents()

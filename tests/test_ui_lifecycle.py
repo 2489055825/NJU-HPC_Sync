@@ -85,6 +85,72 @@ def test_totp_stop_restores_ui_without_waiting_for_next_window(window, monkeypat
     assert window.status_label.text() == RunStatus.CANCELLED.value
 
 
+def test_auto_mode_requests_key_passphrase_manually_before_account_totp(window, monkeypatch, tmp_path):
+    prompts = []
+    original = module.AutoAuthProvider
+
+    def provider(*args, **kwargs):
+        value = original(*args, **kwargs)
+        value.session.clock = lambda: 100.0
+        return value
+
+    monkeypatch.setattr(module, "AutoAuthProvider", provider)
+    script = ("import sys; print(\"Enter passphrase for key '/tmp/synthetic-key': \",end='',flush=True); "
+              "key=sys.stdin.readline().strip(); sys.exit(2) if key!='synthetic-key-passphrase' else None; "
+              "print('Password:',flush=True); account=sys.stdin.readline().strip(); "
+              "sys.exit(3) if not account.startswith('synthetic-fixed ') else None; "
+              "print('sending incremental file list',flush=True)")
+    script_path = tmp_path / "synthetic-key-auth.py"
+    script_path.write_text(script, encoding="utf-8")
+    monkeypatch.setattr(module, "build_command", lambda request: [sys.executable, str(script_path)])
+    window.credentials["synthetic"] = Credential("synthetic", "synthetic-fixed", "JBSWY3DPEHPK3PXP")
+    window.credential.addItem("synthetic", "synthetic")
+    window.credential.setCurrentIndex(window.credential.findData("synthetic"))
+    window.auth_mode.setCurrentIndex(window.auth_mode.findData("auto"))
+    timer = QTimer(window)
+
+    def answer_dialog():
+        dialog = window._active_prompt_dialog
+        if dialog is not None:
+            prompts.append(dialog.prompt_label.text())
+            assert dialog.windowTitle() == "SSH 私钥解锁"
+            dialog.password.setText("synthetic-key-passphrase")
+            dialog.accept()
+            timer.stop()
+
+    timer.timeout.connect(answer_dialog)
+    timer.start(10)
+    try:
+        window._start_sync()
+        pump_until(lambda: window._worker is None)
+    finally:
+        timer.stop()
+    result = window.db.list_history()[0]
+    assert result.status == RunStatus.SUCCESS.value
+    assert len(prompts) == 1 and "passphrase for key" in prompts[0]
+    assert "synthetic-key-passphrase" not in result.log + window.log.toPlainText()
+    assert "synthetic-fixed" not in result.log + window.log.toPlainText()
+
+
+def test_history_write_failure_still_cleans_up_real_gui_worker(window, monkeypatch):
+    import sqlite3
+
+    errors = []
+    monkeypatch.setattr(sys, "excepthook", lambda kind, value, traceback: errors.append(kind.__name__))
+    monkeypatch.setattr(module, "build_command", lambda request: [sys.executable, "-c", "print('sending incremental file list')"])
+
+    def fail_history(_record):
+        raise sqlite3.OperationalError("synthetic disk full")
+
+    monkeypatch.setattr(window.db, "add_history", fail_history)
+    window._start_sync()
+    pump_until(lambda: window._worker is None)
+    assert errors == []
+    assert window.status_label.text() == RunStatus.SUCCESS.value
+    assert window.sync_button.isEnabled() and window.preview_button.isEnabled()
+    assert "历史" in window.statusBar().currentMessage()
+
+
 def test_close_during_totp_wait_saves_final_history_before_database_close(window, monkeypatch, tmp_path):
     errors = []
     monkeypatch.setattr(sys, "excepthook", lambda kind, value, traceback: errors.append(kind.__name__))

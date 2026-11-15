@@ -107,6 +107,13 @@ class Database:
         self._connection.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
         self._connection.commit()
 
+    def rename_credential(self, previous_name: str, new_name: str) -> None:
+        with self._connection:
+            self._connection.execute(
+                "UPDATE profiles SET credential_name=?, updated_at=? WHERE credential_name=?",
+                (new_name, utc_now(), previous_name),
+            )
+
     def add_history(self, record: HistoryRecord) -> int:
         cursor = self._connection.execute(
             "INSERT INTO history(profile_name,start_time,end_time,local_path,remote_host,remote_path,direction,mode,dry_run,status,exit_code,duration,log) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",

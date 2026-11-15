@@ -12,7 +12,7 @@ def test_command_preserves_literal_path_whitespace(value):
     request = SyncRequest(value, "nju", value, Direction.UPLOAD)
     command = build_command(request)
     import shlex
-    assert command[-2] == value + "/"
+    assert command[-2] == str(Path(value).absolute()) + "/"
     assert shlex.split(command[-1].removeprefix("nju:")) == [value + "/" if value.startswith("/") else "./" + value + "/"]
 
 

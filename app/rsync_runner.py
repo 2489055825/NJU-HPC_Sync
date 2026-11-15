@@ -19,9 +19,11 @@ from .runtime import process_identity, stop_session
 # OpenSSH commonly prints `user@host's password:` on one line, while
 # keyboard-interactive gateways may use `Verification code:` or `OTP:`.
 PROMPT_PATTERN = (
-    r"(?im)(?:^|[\r\n])(?![<>ch.][fdLDS][^\r\n]{9} |\*deleting\s)"
-    r"[^\r\n]{0,160}?(?:passphrase[ \t]+for[ \t]+key[ \t]+[^\r\n]+?['\"]"
-    r"|password|passphrase|verification code|otp)[ \t]*[:：][ \t]*"
+    r"(?im)(?:^|[\r\n])[ \t]*(?:"
+    r"(?:enter[ \t]+)?passphrase[ \t]+for[ \t]+key[ \t]+['\"][^\r\n]+?['\"]"
+    r"|(?:(?:[^\s/()]+@[^\s/()]+|\([^\r\n()]+\))[ \t]+)?"
+    r"(?:enter[ \t]+)?(?:password|passphrase|verification[ \t]+code|otp)"
+    r")[ \t]*[:：][ \t]*(?=$|[\r\n])"
 )
 HOST_KEY_PATTERN = r"(?im)(?:^|[\r\n])Are you sure you want to continue connecting\s*\(yes/no(?:/\[fingerprint\])?\)\?\s*"
 

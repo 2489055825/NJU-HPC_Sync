@@ -55,8 +55,9 @@ def redact_text(text: str, secrets: list[str] | tuple[str, ...] = ()) -> str:
     result = text
     for secret in sorted((s for s in secrets if s), key=len, reverse=True):
         result = result.replace(secret, "[REDACTED]")
-    # A prompt or command line should never reveal a complete dynamic password.
-    result = re.sub(r"(?i)(password\s*[:=]\s*)([^\r\n]+)", r"\1[REDACTED]", result)
+    # Redact password labels without treating a filename containing password:
+    # as a label. Known secrets above are removed wherever they occur.
+    result = re.sub(r"(?im)^([ \t]*password[ \t]*[:=][ \t]*)([^\r\n]+)", r"\1[REDACTED]", result)
     return result
 
 

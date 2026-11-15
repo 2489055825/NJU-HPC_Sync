@@ -173,12 +173,17 @@ def execute_task(task_id: str, lease_fd: int, ready_fd: int | None) -> int:
             code = "TRANSFER_FAILED"
             if "HOST_KEY_REQUIRED" in result.output or "需要先在终端核对 SSH 主机指纹" in result.output:
                 code, exit_code = "HOST_KEY_REQUIRED", 5
+            elif "KEY_PASSPHRASE_REQUIRED" in result.output:
+                code, exit_code = "KEY_PASSPHRASE_REQUIRED", 5
             elif result.exit_code == 255 or any(text in result.output.lower() for text in (
                     "permission denied (", "host key verification failed", "remote host identification has changed",
                     "ssh_auth_timeout", "ssh 认证失败")):
                 code, exit_code = "SSH_AUTH_FAILED", 5
             error = {"code": code, "message": "同步未完成，请查看任务日志。",
                      "next_action": "检查连接和认证；根据任务日志决定是否重新提交。"}
+            if code == "KEY_PASSPHRASE_REQUIRED":
+                error["message"] = "SSH 私钥尚未解锁，自动账号密码不能用于私钥口令。"
+                error["next_action"] = "请先在终端使用 ssh-add 解锁所需私钥，或调整该 Host 的 SSH 认证配置，然后重新提交任务。"
         remaining = session_alive(child_identity)
         if remaining:
             state, exit_code = "interrupted", 8

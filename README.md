@@ -31,7 +31,7 @@ rsync -avzP --stats --itemize-changes --protect-args \
 适用于 **Ubuntu 22.04 及以上的 amd64 桌面系统**。从 [Releases](https://github.com/2489055825/NJU-HPC_Sync/releases/latest) 下载 `.deb` 安装包，在下载目录执行：
 
 ```bash
-sudo apt install ./nju-hpc-sync_1.1.3_amd64.deb
+sudo apt install ./nju-hpc-sync_1.1.4_amd64.deb
 nju-hpc-sync
 ```
 
@@ -108,6 +108,10 @@ Host hpc-alias
 | SSH 连接或认证失败 | 可先在终端用 `ssh hpc-alias` 核对地址、账号、端口、网络及密码格式 |
 
 保存的密码和 TOTP Secret 位于本机 `~/.config/nju-hpc-sync/credentials.json`，不要分享该文件。Profile 和历史位于 `~/.local/share/nju-hpc-sync/nju-hpc-sync.sqlite3`。
+
+同时打开多个凭据管理窗口时，保存会检查文件是否已被其他窗口修改；发现冲突会保留当前编辑内容并阻止覆盖，请重新打开凭据管理后再编辑。凭据改名会同步更新引用它的 Profile。
+
+使用加密 SSH 私钥时，GUI 会单独询问私钥口令，即使当前选择了自动 TOTP，也不会把账号密码提交给私钥口令提示。CLI 遇到此提示会返回 `KEY_PASSPHRASE_REQUIRED`（退出码 5），请先在终端使用 `ssh-add` 解锁所需私钥，或调整该 Host 的认证配置后重试。
 
 ## 命令行与 Agent 调用
 
